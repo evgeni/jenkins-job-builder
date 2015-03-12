@@ -634,6 +634,21 @@ def pollurl(parser, xml_parent, data):
                                            *content_type[0:3])
 
 
+def schedule_failed_builds(parser, xml_parent, data):
+    """yaml: schedule-failed-builds
+    Trigger builds after failure (requires ScheduleFailedBuilds plugin)
+
+    :Parameter: spec for retrying failed builds (cron syntax)
+
+    Example::
+
+      triggers:
+        - schedule-failed-builds: "* * * * *"
+    """
+    sfbtrig = XML.SubElement(xml_parent, 'com.progress.hudson.ScheduleFailedBuildsTrigger')
+    XML.SubElement(sfbtrig, 'spec').text = data
+
+
 def timed(parser, xml_parent, data):
     """yaml: timed
     Trigger builds at certain times.
