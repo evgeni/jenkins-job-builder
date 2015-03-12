@@ -76,6 +76,11 @@ def archive(parser, xml_parent, data):
         # Default behavior is to fail the build.
         empty.text = str(data.get('allow-empty', False)).lower()
 
+    if 'only-successful' in data:
+        empty = XML.SubElement(archiver, 'onlyIfSuccessful')
+        # Default behavior is to fail the build.
+        empty.text = str(data.get('only-successful', False)).lower()
+
     if 'fingerprint' in data:
         fingerprint = XML.SubElement(archiver, 'fingerprint')
         fingerprint.text = str(data.get('fingerprint', False)).lower()
