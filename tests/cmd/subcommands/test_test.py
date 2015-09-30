@@ -1,6 +1,5 @@
 import os
 import io
-import codecs
 import yaml
 
 import jenkins
@@ -169,9 +168,8 @@ class TestTests(CmdTestsBase):
         with mock.patch('sys.stdout', console_out):
             cmd.main(['test', os.path.join(self.fixtures_path,
                       'cmd-001.yaml')])
-        xml_content = codecs.open(os.path.join(self.fixtures_path,
-                                               'cmd-001.xml'),
-                                  'r', 'utf-8').read()
+        xml_content = io.open(os.path.join(self.fixtures_path, 'cmd-001.xml'),
+                              'r', encoding='utf-8').read()
         self.assertEqual(console_out.getvalue().decode('utf-8'), xml_content)
 
     def test_config_with_test(self):
@@ -190,7 +188,7 @@ class TestTests(CmdTestsBase):
                          "http://test-jenkins.with.non.default.url:8080/")
 
     @mock.patch('jenkins_jobs.builder.YamlParser.generateXML')
-    @mock.patch('jenkins_jobs.builder.ModuleRegistry')
+    @mock.patch('jenkins_jobs.parser.ModuleRegistry')
     def test_plugins_info_stub_option(self, registry_mock, generateXML_mock):
         """
         Test handling of plugins_info stub option.
@@ -208,13 +206,14 @@ class TestTests(CmdTestsBase):
         with mock.patch('sys.stdout'):
             cmd.execute(args, self.config)   # probably better to fail here
 
-        with open(plugins_info_stub_yaml_file, 'r') as yaml_file:
+        with io.open(plugins_info_stub_yaml_file,
+                     'r', encoding='utf-8') as yaml_file:
             plugins_info_list = yaml.load(yaml_file)
 
         registry_mock.assert_called_with(self.config, plugins_info_list)
 
     @mock.patch('jenkins_jobs.builder.YamlParser.generateXML')
-    @mock.patch('jenkins_jobs.builder.ModuleRegistry')
+    @mock.patch('jenkins_jobs.parser.ModuleRegistry')
     def test_bogus_plugins_info_stub_option(self, registry_mock,
                                             generateXML_mock):
         """
@@ -264,3 +263,30 @@ class TestJenkinsGetPluginInfoError(CmdTestsBase):
                 self.fail("jenkins.JenkinsException propagated to main")
             except:
                 pass  # only care about jenkins.JenkinsException for now
+
+    @mock.patch('jenkins.Jenkins.get_plugins_info')
+    def test_skip_plugin_retrieval_if_no_config_provided(
+            self, get_plugins_info_mock):
+        """
+        Verify that retrieval of information from Jenkins instance about its
+        plugins will be skipped when run if no config file provided.
+        """
+        with mock.patch('sys.stdout'):
+            cmd.main(['test', os.path.join(self.fixtures_path,
+                                           'cmd-001.yaml')])
+        self.assertFalse(get_plugins_info_mock.called)
+
+    @mock.patch('jenkins.Jenkins.get_plugins_info')
+    def test_skip_plugin_retrieval_if_disabled(self, get_plugins_info_mock):
+        """
+        Verify that retrieval of information from Jenkins instance about its
+        plugins will be skipped when run if a config file provided and disables
+        querying through a config option.
+        """
+        with mock.patch('sys.stdout'):
+            cmd.main(['--conf',
+                      os.path.join(self.fixtures_path,
+                                   'disable-query-plugins.conf'),
+                      'test',
+                      os.path.join(self.fixtures_path, 'cmd-001.yaml')])
+        self.assertFalse(get_plugins_info_mock.called)

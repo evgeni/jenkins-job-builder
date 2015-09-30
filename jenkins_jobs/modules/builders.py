@@ -40,8 +40,11 @@ Example::
 import xml.etree.ElementTree as XML
 import jenkins_jobs.modules.base
 from jenkins_jobs.modules import hudson_model
+from jenkins_jobs.modules.helpers import config_file_provider_builder
 from jenkins_jobs.modules.helpers import config_file_provider_settings
-from jenkins_jobs.errors import JenkinsJobsException
+from jenkins_jobs.errors import (JenkinsJobsException,
+                                 MissingAttributeError,
+                                 InvalidAttributeError)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -152,10 +155,9 @@ def copyartifact(parser, xml_parent, data):
                   'workspace-latest': 'WorkspaceSelector',
                   'build-param': 'ParameterizedBuildSelector'}
     if select not in selectdict:
-        raise JenkinsJobsException("which-build entered is not valid must be "
-                                   "one of: last-successful, specific-build, "
-                                   "last-saved, upstream-build, permalink, "
-                                   "workspace-latest, or build-param")
+        raise InvalidAttributeError('which-build',
+                                    select,
+                                    selectdict.keys())
     permalink = data.get('permalink', 'last')
     permalinkdict = {'last': 'lastBuild',
                      'last-stable': 'lastStableBuild',
@@ -164,10 +166,9 @@ def copyartifact(parser, xml_parent, data):
                      'last-unstable': 'lastUnstableBuild',
                      'last-unsuccessful': 'lastUnsuccessfulBuild'}
     if permalink not in permalinkdict:
-        raise JenkinsJobsException("permalink entered is not valid must be "
-                                   "one of: last, last-stable, "
-                                   "last-successful, last-failed, "
-                                   "last-unstable, or last-unsuccessful")
+        raise InvalidAttributeError('permalink',
+                                    permalink,
+                                    permalinkdict.keys())
     selector = XML.SubElement(t, 'selector',
                               {'class': 'hudson.plugins.copyartifact.' +
                                selectdict[select]})
@@ -276,15 +277,117 @@ def ant(parser, xml_parent, data):
     XML.SubElement(ant, 'antName').text = data.get('ant-name', 'default')
 
 
+def trigger_remote(parser, xml_parent, data):
+    """yaml: trigger-remote
+    Trigger build of job on remote Jenkins instance.
+
+    :jenkins-wiki:`Parameterized Remote Trigger Plugin
+    <Parameterized+Remote+Trigger+Plugin>`
+
+    Please note that this plugin requires system configuration on the Jenkins
+    Master that is unavailable from individual job views; specifically, one
+    must add remote jenkins servers whose 'Display Name' field are what make up
+    valid fields on the `remote-jenkins-name` attribute below.
+
+    :arg str remote-jenkins-name: the remote Jenkins server (required)
+    :arg str job: the Jenkins project to trigger on the remote Jenkins server
+      (required)
+    :arg bool should-not-fail-build:
+      if true, remote job failure will not lead current job to fail
+      (default false)
+    :arg bool prevent-remote-build-queue:
+      if true, wait to trigger remote builds until no other builds
+      (default false)
+    :arg bool block: whether to wait for the trigger jobs to finish or not
+      (default true)
+    :arg str poll-interval: polling interval in seconds for checking statues of
+      triggered remote job, only necessary if current job is configured to
+      block
+      (default 10)
+    :arg str connection-retry-limit: number of connection attempts to remote
+      Jenkins server before giving up.
+      (default 5)
+    :arg str predefined-parameters: predefined parameters to send to the remote
+      job when triggering it
+      (optional)
+    :arg str property-file: file in workspace of current job containing
+      additional parameters to be set on remote job
+      (optional)
+
+    Example:
+
+    .. literalinclude:: \
+    /../../tests/builders/fixtures/trigger-remote/trigger-remote001.yaml
+       :language: yaml
+    """
+    triggerr = XML.SubElement(xml_parent,
+                              'org.jenkinsci.plugins.'
+                              'ParameterizedRemoteTrigger.'
+                              'RemoteBuildConfiguration')
+    XML.SubElement(triggerr,
+                   'remoteJenkinsName').text = data.get('remote-jenkins-name')
+    XML.SubElement(triggerr, 'token').text = data.get('token', '')
+
+    for attribute in ['job', 'remote-jenkins-name']:
+        if attribute not in data:
+            raise MissingAttributeError(attribute, "builders.trigger-remote")
+        if data[attribute] == '':
+            raise InvalidAttributeError(attribute,
+                                        data[attribute],
+                                        "builders.trigger-remote")
+
+    XML.SubElement(triggerr, 'job').text = data.get('job')
+
+    XML.SubElement(triggerr, 'shouldNotFailBuild').text = str(
+        data.get('should-not-fail-build', False)).lower()
+
+    XML.SubElement(triggerr,
+                   'pollInterval').text = str(data.get('poll-interval', 10))
+    XML.SubElement(triggerr, 'connectionRetryLimit').text = str(
+        data.get('connection-retry-limit', 5))
+
+    XML.SubElement(triggerr, 'preventRemoteBuildQueue').text = str(
+        data.get('prevent-remote-build-queue', False)).lower()
+
+    XML.SubElement(triggerr, 'blockBuildUntilComplete').text = str(
+        data.get('block', True)).lower()
+
+    if 'predefined-parameters' in data:
+        parameters = XML.SubElement(triggerr, 'parameters')
+        parameters.text = data.get('predefined-parameters', '')
+        params_list = parameters.text.split("\n")
+
+        parameter_list = XML.SubElement(triggerr, 'parameterList')
+        for param in params_list:
+            if param == '':
+                continue
+            tmp = XML.SubElement(parameter_list, 'string')
+            tmp.text = param
+
+    if 'property-file' in data and data['property-file'] != '':
+        XML.SubElement(triggerr, 'loadParamsFromFile').text = 'true'
+        XML.SubElement(triggerr,
+                       'parameterFile').text = data.get('property-file')
+    else:
+        XML.SubElement(triggerr, 'loadParamsFromFile').text = 'false'
+
+    XML.SubElement(triggerr, 'overrideAuth').text = "false"
+
+
 def trigger_builds(parser, xml_parent, data):
     """yaml: trigger-builds
     Trigger builds of other jobs.
     Requires the Jenkins :jenkins-wiki:`Parameterized Trigger Plugin
     <Parameterized+Trigger+Plugin>`.
 
-    :arg str project: the Jenkins project to trigger
+    :arg list project: the Jenkins project to trigger
     :arg str predefined-parameters:
       key/value pairs to be passed to the job (optional)
+    :arg list bool-parameters:
+
+      :Bool: * **name** (`str`) -- Parameter name
+             * **value** (`bool`) -- Value to set (default false)
+
     :arg str property-file:
       Pass properties from file to the other job (optional)
     :arg bool property-file-fail-on-missing:
@@ -293,7 +396,15 @@ def trigger_builds(parser, xml_parent, data):
     :arg bool current-parameters: Whether to include the
       parameters passed to the current build to the
       triggered job.
+    :arg str node-label-name: Define a name for the NodeLabel parameter to be
+      set. Used in conjunction with node-label. Requires NodeLabel Parameter
+      Plugin (optional)
+    :arg str node-label: Label of the nodes where build should be triggered.
+      Used in conjunction with node-label-name.  Requires NodeLabel Parameter
+      Plugin (optional)
     :arg bool svn-revision: Whether to pass the svn revision
+      to the triggered job
+    :arg bool git-revision: Whether to pass the git revision
       to the triggered job
     :arg bool block: whether to wait for the triggered jobs
       to finish or not (default false)
@@ -348,9 +459,20 @@ def trigger_builds(parser, xml_parent, data):
 
     Examples:
 
-    Basic usage.
+    Basic usage with yaml list of projects.
+
+    .. literalinclude::
+       /../../tests/builders/fixtures/trigger-builds/project-list.yaml
+       :language: yaml
+
+    Basic usage with passing svn revision through.
 
     .. literalinclude:: /../../tests/builders/fixtures/trigger-builds001.yaml
+       :language: yaml
+
+    Basic usage with passing git revision through.
+
+    .. literalinclude:: /../../tests/builders/fixtures/trigger-builds006.yaml
        :language: yaml
 
     Example with all supported parameter factories.
@@ -379,6 +501,12 @@ def trigger_builds(parser, xml_parent, data):
             XML.SubElement(tconfigs,
                            'hudson.plugins.parameterizedtrigger.'
                            'SubversionRevisionBuildParameters')
+        if(project_def.get('git-revision')):
+            params = XML.SubElement(tconfigs,
+                                    'hudson.plugins.git.'
+                                    'GitRevisionBuildParameters')
+            combine = XML.SubElement(params, 'combineQueuedCommits')
+            combine.text = 'false'
         if(project_def.get('same-node')):
             XML.SubElement(tconfigs,
                            'hudson.plugins.parameterizedtrigger.'
@@ -400,6 +528,29 @@ def trigger_builds(parser, xml_parent, data):
                                     'PredefinedBuildParameters')
             properties = XML.SubElement(params, 'properties')
             properties.text = project_def['predefined-parameters']
+
+        if 'bool-parameters' in project_def:
+            params = XML.SubElement(tconfigs,
+                                    'hudson.plugins.parameterizedtrigger.'
+                                    'BooleanParameters')
+            configs = XML.SubElement(params, 'configs')
+            for bool_param in project_def['bool-parameters']:
+                param = XML.SubElement(configs,
+                                       'hudson.plugins.parameterizedtrigger.'
+                                       'BooleanParameterConfig')
+                XML.SubElement(param, 'name').text = str(bool_param['name'])
+                XML.SubElement(param, 'value').text = str(
+                    bool_param.get('value', False)).lower()
+
+        if 'node-label-name' in project_def and 'node-label' in project_def:
+            node = XML.SubElement(tconfigs, 'org.jvnet.jenkins.plugins.'
+                                  'nodelabelparameter.parameterizedtrigger.'
+                                  'NodeLabelBuildParameter')
+            XML.SubElement(node, 'name').text = \
+                project_def.get('node-label-name')
+            XML.SubElement(node, 'nodeLabel').text = \
+                project_def.get('node-label')
+
         if(len(list(tconfigs)) == 0):
             tconfigs.set('class', 'java.util.Collections$EmptyList')
 
@@ -414,8 +565,9 @@ def trigger_builds(parser, xml_parent, data):
             for factory in project_def['parameter-factories']:
 
                 if factory['factory'] not in supported_factories:
-                    raise JenkinsJobsException("factory must be one of %s" %
-                                               ", ".join(supported_factories))
+                    raise InvalidAttributeError('factory',
+                                                factory['factory'],
+                                                supported_factories)
 
                 if factory['factory'] == 'filebuild':
                     params = XML.SubElement(
@@ -430,7 +582,7 @@ def trigger_builds(parser, xml_parent, data):
                     parameterName = XML.SubElement(params, 'parameterName')
                     parameterName.text = factory['parameter-name']
                 if (factory['factory'] == 'filebuild' or
-                    factory['factory'] == 'binaryfile'):
+                        factory['factory'] == 'binaryfile'):
                     filePattern = XML.SubElement(params, 'filePattern')
                     filePattern.text = factory['file-pattern']
                     noFilesFoundAction = XML.SubElement(
@@ -439,9 +591,9 @@ def trigger_builds(parser, xml_parent, data):
                     noFilesFoundActionValue = str(factory.get(
                         'no-files-found-action', 'SKIP'))
                     if noFilesFoundActionValue not in supported_actions:
-                        raise JenkinsJobsException(
-                            "no-files-found-action must be one of %s" %
-                            ", ".join(supported_actions))
+                        raise InvalidAttributeError('no-files-found-action',
+                                                    noFilesFoundActionValue,
+                                                    supported_actions)
                     noFilesFoundAction.text = noFilesFoundActionValue
                 if factory['factory'] == 'counterbuild':
                     params = XML.SubElement(
@@ -461,9 +613,9 @@ def trigger_builds(parser, xml_parent, data):
                     validationFailValue = str(factory.get(
                         'validation-fail', 'FAIL'))
                     if validationFailValue not in supported_actions:
-                        raise JenkinsJobsException(
-                            "validation-fail action must be one of %s" %
-                            ", ".join(supported_actions))
+                        raise InvalidAttributeError('validation-fail',
+                                                    validationFailValue,
+                                                    supported_actions)
                     validationFail.text = validationFailValue
                 if factory['factory'] == 'allnodesforlabel':
                     params = XML.SubElement(
@@ -483,7 +635,11 @@ def trigger_builds(parser, xml_parent, data):
                         'ignore-offline-nodes', True)).lower()
 
         projects = XML.SubElement(tconfig, 'projects')
-        projects.text = project_def['project']
+        if isinstance(project_def['project'], list):
+            projects.text = ",".join(project_def['project'])
+        else:
+            projects.text = project_def['project']
+
         condition = XML.SubElement(tconfig, 'condition')
         condition.text = 'ALWAYS'
         trigger_with_no_params = XML.SubElement(tconfig,
@@ -515,9 +671,9 @@ def trigger_builds(parser, xml_parent, data):
                 if tvalue.lower() == supported_threshold_values[0]:
                     continue
                 if tvalue.upper() not in supported_threshold_values:
-                    raise JenkinsJobsException(
-                        "threshold value must be one of (%s)" %
-                        ", ".join(supported_threshold_values))
+                    raise InvalidAttributeError(toptname,
+                                                tvalue,
+                                                supported_threshold_values)
                 th = XML.SubElement(block, txmltag)
                 XML.SubElement(th, 'name').text = hudson_model.THRESHOLDS[
                     tvalue.upper()]['name']
@@ -870,83 +1026,262 @@ def conditional_step(parser, xml_parent, data):
     boolean-expression Run the step if the expression expends to a
                        representation of true
 
-                         :condition-expression: Expression to expand
+                         :condition-expression: Expression to expand (required)
+    build-cause        Run if the current build has a specific cause
+
+                         :cause: The cause why the build was triggered.
+                           Following causes are supported -
+
+                           :USER_CAUSE: build was triggered by a manual
+                             interaction. (default)
+                           :SCM_CAUSE: build was triggered by a SCM change.
+                           :TIMER_CAUSE: build was triggered by a timer.
+                           :CLI_CAUSE: build was triggered by via CLI interface
+                           :REMOTE_CAUSE: build was triggered via remote
+                             interface.
+                           :UPSTREAM_CAUSE: build was triggered by an upstream
+                             project.
+
+                           Following supported if XTrigger plugin installed:
+
+                           :FS_CAUSE: build was triggered by a file system
+                             change (FSTrigger Plugin).
+                           :URL_CAUSE: build was triggered by a URL change
+                             (URLTrigger Plugin)
+                           :IVY_CAUSE: build triggered by an Ivy dependency
+                             version has change (IvyTrigger Plugin)
+                           :SCRIPT_CAUSE: build was triggered by a script
+                             (ScriptTrigger Plugin)
+                           :BUILDRESULT_CAUSE: build was triggered by a
+                             result of an other job (BuildResultTrigger Plugin)
+                         :exclusive-cause: (bool) There might by multiple
+                           casues causing a build to be triggered, with
+                           this true, the cause must be the only one
+                           causing this build this build to be triggered.
+                           (default False)
+    day-of-week        Only run on specific days of the week.
+
+                         :day-selector: Days you want the build to run on.
+                           Following values are supported -
+
+                           :weekend: Saturday and Sunday (default).
+                           :weekday: Monday - Friday.
+                           :select-days: Selected days, defined by 'days'
+                             below.
+                           :days: True for days for which the build should
+                             run. Definition needed only for 'select-days'
+                             day-selector, at the same level as day-selector.
+                             Define the days to run under this.
+
+                             :SUN: Run on Sunday (default False)
+                             :MON: Run on Monday (default False)
+                             :TUES: Run on Tuesday (default False)
+                             :WED: Run on Wednesday (default False)
+                             :THURS: Run on Thursday (default False)
+                             :FRI: Run on Friday (default False)
+                             :SAT: Run on Saturday (default False)
+                         :use-build-time: (bool) Use the build time instead of
+                           the the time that the condition is evaluated.
+                           (default False)
+    execution-node     Run only on selected nodes.
+
+                         :nodes: (list) List of nodes to execute on. (required)
     strings-match      Run the step if two strings match
 
-                         :condition-string1: First string
-                         :condition-string2: Second string
+                         :condition-string1: First string (optional)
+                         :condition-string2: Second string (optional)
                          :condition-case-insensitive: Case insensitive
-                           defaults to false
+                           (default False)
     current-status     Run the build step if the current build status is
                        within the configured range
 
                          :condition-worst: Accepted values are SUCCESS,
                            UNSTABLE, FAILURE, NOT_BUILD, ABORTED
+                           (default SUCCESS)
                          :condition-best: Accepted values are SUCCESS,
                            UNSTABLE, FAILURE, NOT_BUILD, ABORTED
+                           (default SUCCESS)
 
     shell              Run the step if the shell command succeed
 
                          :condition-command: Shell command to execute
+                           (optional)
     windows-shell      Similar to shell, except that commands will be
                        executed by cmd, under Windows
 
-                         :condition-command: Command to execute
+                         :condition-command: Command to execute (optional)
     file-exists        Run the step if a file exists
 
                          :condition-filename: Check existence of this file
+                           (required)
                          :condition-basedir: If condition-filename is
                            relative, it will be considered relative to
                            either `workspace`, `artifact-directory`,
-                           or `jenkins-home`. Default is `workspace`.
+                           or `jenkins-home`. (default 'workspace')
+    files-match        Run if one or more files match the selectors.
+
+                         :include-pattern: (list str) List of Includes
+                           Patterns. Since the separator in the patterns is
+                           hardcoded as ',', any use of ',' would need
+                           escaping. (optional)
+                         :exclude-pattern: (list str) List of Excludes
+                           Patterns. Since the separator in the patterns is
+                           hardcoded as ',', any use of ',' would need
+                           escaping. (optional)
+                         :condition-basedir: Accepted values are `workspace`,
+                           `artifact-directory`, or `jenkins-home`.
+                           (default 'workspace')
+    num-comp           Run if the numerical comparison is true.
+
+                         :lhs: Left Hand Side. Must evaluate to a number.
+                           (required)
+                         :rhs: Right Hand Side. Must evaluate to a number.
+                           (required)
+                         :comparator: Accepted values are `less-than`,
+                           `greater-than`, `equal`, `not-equal`,
+                           `less-than-equal`, `greater-than-equal`.
+                           (default 'less-than')
+    regex-match        Run if the Expression matches the Label.
+
+                         :regex: The regular expression used to match the label
+                           (optional)
+                         :label: The label that will be tested by the regular
+                           expression. (optional)
+    time               Only run during a certain period of the day.
+
+                         :earliest-hour: Starting hour (default "09")
+                         :earliest-min: Starting min (default "00")
+                         :latest-hour: Ending hour (default "17")
+                         :latest-min: Ending min (default "30")
+                         :use-build-time: (bool) Use the build time instead of
+                           the the time that the condition is evaluated.
+                           (default False)
     not                Run the step if the inverse of the condition-operand
                        is true
 
                          :condition-operand: Condition to evaluate.  Can be
-                           any supported conditional-step condition.
+                           any supported conditional-step condition. (required)
+    and                Run the step if logical and of all conditional-operands
+                       is true
+
+                         :condition-operands: (list) Conditions to evaluate.
+                           Can be any supported conditional-step condition.
+                           (required)
+    or                 Run the step if logical or of all conditional-operands
+                       is true
+
+                         :condition-operands: (list) Conditions to evaluate.
+                           Can be any supported conditional-step condition.
+                           (required)
     ================== ====================================================
 
     Example:
 
-    .. literalinclude:: \
-    /../../tests/builders/fixtures/conditional-step-success-failure.yaml
-       :language: yaml
-    .. literalinclude:: \
-    /../../tests/builders/fixtures/conditional-step-not-file-exists.yaml
-       :language: yaml
+    .. literalinclude::
+        /../../tests/builders/fixtures/conditional-step-success-failure.yaml
+        :language: yaml
+    .. literalinclude::
+        /../../tests/builders/fixtures/conditional-step-not-file-exists.yaml
+        :language: yaml
+    .. literalinclude::
+        /../../tests/builders/fixtures/conditional-step-day-of-week001.yaml
+        :language: yaml
+    .. literalinclude::
+        /../../tests/builders/fixtures/conditional-step-day-of-week003.yaml
+        :language: yaml
+    .. literalinclude::
+        /../../tests/builders/fixtures/conditional-step-time.yaml
+        :language: yaml
+    .. literalinclude::
+        /../../tests/builders/fixtures/conditional-step-regex-match.yaml
+        :language: yaml
+    .. literalinclude::
+        /../../tests/builders/fixtures/conditional-step-or.yaml
+        :language: yaml
+    .. literalinclude::
+        /../../tests/builders/fixtures/conditional-step-and.yaml
+        :language: yaml
     """
     def build_condition(cdata, cond_root_tag):
         kind = cdata['condition-kind']
         ctag = XML.SubElement(cond_root_tag, condition_tag)
+        core_prefix = 'org.jenkins_ci.plugins.run_condition.core.'
+        logic_prefix = 'org.jenkins_ci.plugins.run_condition.logic.'
         if kind == "always":
-            ctag.set('class',
-                     'org.jenkins_ci.plugins.run_condition.core.AlwaysRun')
+            ctag.set('class', core_prefix + 'AlwaysRun')
         elif kind == "never":
-            ctag.set('class',
-                     'org.jenkins_ci.plugins.run_condition.core.NeverRun')
+            ctag.set('class', core_prefix + 'NeverRun')
         elif kind == "boolean-expression":
-            ctag.set('class',
-                     'org.jenkins_ci.plugins.run_condition.core.'
-                     'BooleanCondition')
-            XML.SubElement(ctag, "token").text = cdata['condition-expression']
+            ctag.set('class', core_prefix + 'BooleanCondition')
+            try:
+                XML.SubElement(ctag, "token").text = \
+                    cdata['condition-expression']
+            except KeyError:
+                raise MissingAttributeError('condition-expression')
+        elif kind == "build-cause":
+            ctag.set('class', core_prefix + 'CauseCondition')
+            cause_list = ('USER_CAUSE', 'SCM_CAUSE', 'TIMER_CAUSE',
+                          'CLI_CAUSE', 'REMOTE_CAUSE', 'UPSTREAM_CAUSE',
+                          'FS_CAUSE', 'URL_CAUSE', 'IVY_CAUSE',
+                          'SCRIPT_CAUSE', 'BUILDRESULT_CAUSE')
+            cause_name = cdata.get('cause', 'USER_CAUSE')
+            if cause_name not in cause_list:
+                raise InvalidAttributeError('cause', cause_name, cause_list)
+            XML.SubElement(ctag, "buildCause").text = cause_name
+            XML.SubElement(ctag, "exclusiveCause").text = str(cdata.get(
+                'exclusive-cause', False)).lower()
+        elif kind == "day-of-week":
+            ctag.set('class', core_prefix + 'DayCondition')
+            day_selector_class_prefix = core_prefix + 'DayCondition$'
+            day_selector_classes = {
+                'weekend': day_selector_class_prefix + 'Weekend',
+                'weekday': day_selector_class_prefix + 'Weekday',
+                'select-days': day_selector_class_prefix + 'SelectDays',
+            }
+            day_selector = cdata.get('day-selector', 'weekend')
+            if day_selector not in day_selector_classes:
+                raise InvalidAttributeError('day-selector', day_selector,
+                                            day_selector_classes)
+            day_selector_tag = XML.SubElement(ctag, "daySelector")
+            day_selector_tag.set('class', day_selector_classes[day_selector])
+            if day_selector == "select-days":
+                days_tag = XML.SubElement(day_selector_tag, "days")
+                day_tag_text = ('org.jenkins__ci.plugins.run__condition.'
+                                'core.DayCondition_-Day')
+                inp_days = cdata.get('days') if cdata.get('days') else {}
+                days = ['SUN', 'MON', 'TUES', 'WED', 'THURS', 'FRI', 'SAT']
+                for day_no, day in enumerate(days, 1):
+                    day_tag = XML.SubElement(days_tag, day_tag_text)
+                    XML.SubElement(day_tag, "day").text = str(day_no)
+                    XML.SubElement(day_tag, "selected").text = str(
+                        inp_days.get(day, False)).lower()
+            XML.SubElement(ctag, "useBuildTime").text = str(cdata.get(
+                'use-build-time', False)).lower()
+        elif kind == "execution-node":
+            ctag.set('class', core_prefix + 'NodeCondition')
+            allowed_nodes_tag = XML.SubElement(ctag, "allowedNodes")
+            try:
+                nodes_list = cdata['nodes']
+            except KeyError:
+                raise MissingAttributeError('nodes')
+            for node in nodes_list:
+                node_tag = XML.SubElement(allowed_nodes_tag, "string")
+                node_tag.text = node
         elif kind == "strings-match":
-            ctag.set('class',
-                     'org.jenkins_ci.plugins.run_condition.core.'
-                     'StringsMatchCondition')
-            XML.SubElement(ctag, "arg1").text = cdata['condition-string1']
-            XML.SubElement(ctag, "arg2").text = cdata['condition-string2']
+            ctag.set('class', core_prefix + 'StringsMatchCondition')
+            XML.SubElement(ctag, "arg1").text = cdata.get(
+                'condition-string1', '')
+            XML.SubElement(ctag, "arg2").text = cdata.get(
+                'condition-string2', '')
             XML.SubElement(ctag, "ignoreCase").text = str(cdata.get(
                 'condition-case-insensitive', False)).lower()
         elif kind == "current-status":
-            ctag.set('class',
-                     'org.jenkins_ci.plugins.run_condition.core.'
-                     'StatusCondition')
+            ctag.set('class', core_prefix + 'StatusCondition')
             wr = XML.SubElement(ctag, 'worstResult')
-            wr_name = cdata['condition-worst']
+            wr_name = cdata.get('condition-worst', 'SUCCESS')
             if wr_name not in hudson_model.THRESHOLDS:
-                raise JenkinsJobsException(
-                    "threshold must be one of %s" %
-                    ", ".join(hudson_model.THRESHOLDS.keys()))
+                raise InvalidAttributeError('condition-worst', wr_name,
+                                            hudson_model.THRESHOLDS.keys())
             wr_threshold = hudson_model.THRESHOLDS[wr_name]
             XML.SubElement(wr, "name").text = wr_threshold['name']
             XML.SubElement(wr, "ordinal").text = wr_threshold['ordinal']
@@ -955,11 +1290,10 @@ def conditional_step(parser, xml_parent, data):
                 str(wr_threshold['complete']).lower()
 
             br = XML.SubElement(ctag, 'bestResult')
-            br_name = cdata['condition-best']
-            if not br_name in hudson_model.THRESHOLDS:
-                raise JenkinsJobsException(
-                    "threshold must be one of %s" %
-                    ", ".join(hudson_model.THRESHOLDS.keys()))
+            br_name = cdata.get('condition-best', 'SUCCESS')
+            if br_name not in hudson_model.THRESHOLDS:
+                raise InvalidAttributeError('condition-best', br_name,
+                                            hudson_model.THRESHOLDS.keys())
             br_threshold = hudson_model.THRESHOLDS[br_name]
             XML.SubElement(br, "name").text = br_threshold['name']
             XML.SubElement(br, "ordinal").text = br_threshold['ordinal']
@@ -970,36 +1304,102 @@ def conditional_step(parser, xml_parent, data):
             ctag.set('class',
                      'org.jenkins_ci.plugins.run_condition.contributed.'
                      'ShellCondition')
-            XML.SubElement(ctag, "command").text = cdata['condition-command']
+            XML.SubElement(ctag, "command").text = cdata.get(
+                'condition-command', '')
         elif kind == "windows-shell":
             ctag.set('class',
                      'org.jenkins_ci.plugins.run_condition.contributed.'
                      'BatchFileCondition')
-            XML.SubElement(ctag, "command").text = cdata['condition-command']
-        elif kind == "file-exists":
-            ctag.set('class',
-                     'org.jenkins_ci.plugins.run_condition.core.'
-                     'FileExistsCondition')
-            XML.SubElement(ctag, "file").text = cdata['condition-filename']
+            XML.SubElement(ctag, "command").text = cdata.get(
+                'condition-command', '')
+        elif kind == "file-exists" or kind == "files-match":
+            if kind == "file-exists":
+                ctag.set('class', core_prefix + 'FileExistsCondition')
+                try:
+                    XML.SubElement(ctag, "file").text = \
+                        cdata['condition-filename']
+                except KeyError:
+                    raise MissingAttributeError('condition-filename')
+            else:
+                ctag.set('class', core_prefix + 'FilesMatchCondition')
+                XML.SubElement(ctag, "includes").text = ",".join(cdata.get(
+                    'include-pattern', ''))
+                XML.SubElement(ctag, "excludes").text = ",".join(cdata.get(
+                    'exclude-pattern', ''))
+            basedir_class_prefix = ('org.jenkins_ci.plugins.run_condition.'
+                                    'common.BaseDirectory$')
+            basedir_classes = {
+                'workspace': basedir_class_prefix + 'Workspace',
+                'artifact-directory': basedir_class_prefix + 'ArtifactsDir',
+                'jenkins-home': basedir_class_prefix + 'JenkinsHome'
+            }
             basedir = cdata.get('condition-basedir', 'workspace')
-            basedir_tag = XML.SubElement(ctag, "baseDir")
-            if "workspace" == basedir:
-                basedir_tag.set('class',
-                                'org.jenkins_ci.plugins.run_condition.common.'
-                                'BaseDirectory$Workspace')
-            elif "artifact-directory" == basedir:
-                basedir_tag.set('class',
-                                'org.jenkins_ci.plugins.run_condition.common.'
-                                'BaseDirectory$ArtifactsDir')
-            elif "jenkins-home" == basedir:
-                basedir_tag.set('class',
-                                'org.jenkins_ci.plugins.run_condition.common.'
-                                'BaseDirectory$JenkinsHome')
+            if basedir not in basedir_classes:
+                raise InvalidAttributeError('condition-basedir', basedir,
+                                            basedir_classes)
+            XML.SubElement(ctag, "baseDir").set('class',
+                                                basedir_classes[basedir])
+        elif kind == "num-comp":
+            ctag.set('class', core_prefix + 'NumericalComparisonCondition')
+            try:
+                XML.SubElement(ctag, "lhs").text = cdata['lhs']
+                XML.SubElement(ctag, "rhs").text = cdata['rhs']
+            except KeyError as e:
+                raise MissingAttributeError(e.args[0])
+            comp_class_prefix = core_prefix + 'NumericalComparisonCondition$'
+            comp_classes = {
+                'less-than': comp_class_prefix + 'LessThan',
+                'greater-than': comp_class_prefix + 'GreaterThan',
+                'equal': comp_class_prefix + 'EqualTo',
+                'not-equal': comp_class_prefix + 'NotEqualTo',
+                'less-than-equal': comp_class_prefix + 'LessThanOrEqualTo',
+                'greater-than-equal': comp_class_prefix +
+                'GreaterThanOrEqualTo'
+            }
+            comp = cdata.get('comparator', 'less-than')
+            if comp not in comp_classes:
+                raise InvalidAttributeError('comparator', comp, comp_classes)
+            XML.SubElement(ctag, "comparator").set('class',
+                                                   comp_classes[comp])
+        elif kind == "regex-match":
+            ctag.set('class', core_prefix + 'ExpressionCondition')
+            XML.SubElement(ctag, "expression").text = cdata.get('regex', '')
+            XML.SubElement(ctag, "label").text = cdata.get('label', '')
+        elif kind == "time":
+            ctag.set('class', core_prefix + 'TimeCondition')
+            XML.SubElement(ctag, "earliestHours").text = cdata.get(
+                'earliest-hour', '09')
+            XML.SubElement(ctag, "earliestMinutes").text = cdata.get(
+                'earliest-min', '00')
+            XML.SubElement(ctag, "latestHours").text = cdata.get(
+                'latest-hour', '17')
+            XML.SubElement(ctag, "latestMinutes").text = cdata.get(
+                'latest-min', '30')
+            XML.SubElement(ctag, "useBuildTime").text = str(cdata.get(
+                'use-build-time', False)).lower()
         elif kind == "not":
-            ctag.set('class',
-                     'org.jenkins_ci.plugins.run_condition.logic.Not')
-            notcondition = cdata['condition-operand']
+            ctag.set('class', logic_prefix + 'Not')
+            try:
+                notcondition = cdata['condition-operand']
+            except KeyError:
+                raise MissingAttributeError('condition-operand')
             build_condition(notcondition, ctag)
+        elif kind == "and" or "or":
+            if kind == "and":
+                ctag.set('class', logic_prefix + 'And')
+            else:
+                ctag.set('class', logic_prefix + 'Or')
+            conditions_tag = XML.SubElement(ctag, "conditions")
+            container_tag_text = ('org.jenkins__ci.plugins.run__condition.'
+                                  'logic.ConditionContainer')
+            try:
+                conditions_list = cdata['condition-operands']
+            except KeyError:
+                raise MissingAttributeError('condition-operands')
+            for condition in conditions_list:
+                conditions_container_tag = XML.SubElement(conditions_tag,
+                                                          container_tag_text)
+                build_condition(condition, conditions_container_tag)
 
     def build_step(parent, step):
         for edited_node in create_builders(parser, step):
@@ -1040,6 +1440,41 @@ def conditional_step(parser, xml_parent, data):
                                            evaluation_class)
     for step in steps:
         build_step(steps_parent, step)
+
+
+def maven_builder(parser, xml_parent, data):
+    """yaml: maven-builder
+    Execute Maven3 builder
+
+    :arg str name: Name of maven installation from the configuration
+    :arg str pom: Location of pom.xml (default 'pom.xml')
+    :arg str goals: Goals to execute
+    :arg str maven-opts: Additional options for maven (optional)
+
+    Requires the Jenkins `Artifactory Plugin
+    <https://wiki.jenkins-ci.org/display/JENKINS/Artifactory+Plugin>`_
+    allows your build jobs to deploy artifacts automatically to Artifactory.
+
+    Example:
+
+    .. literalinclude:: /../../tests/builders/fixtures/maven-builder001.yaml
+       :language: yaml
+    """
+    maven = XML.SubElement(xml_parent, 'org.jfrog.hudson.maven3.Maven3Builder')
+
+    required = {
+        'mavenName': 'name',
+        'goals': 'goals',
+    }
+
+    for key in required:
+        try:
+            XML.SubElement(maven, key).text = data[required[key]]
+        except KeyError:
+            raise MissingAttributeError(required[key])
+
+    XML.SubElement(maven, 'rootPom').text = data.get('pom', 'pom.xml')
+    XML.SubElement(maven, 'mavenOpts').text = data.get('maven-opts', '')
 
 
 def maven_target(parser, xml_parent, data):
@@ -1100,7 +1535,10 @@ def multijob(parser, xml_parent, data):
     :py:class:`jenkins_jobs.modules.project_multijob.MultiJob` projects.
 
     :arg str name: MultiJob phase name
-    :arg str condition: when to trigger the other job (default 'SUCCESSFUL')
+    :arg str condition: when to trigger the other job.
+        Can be: 'SUCCESSFUL', 'UNSTABLE', 'COMPLETED', 'FAILURE'.
+        (default 'SUCCESSFUL')
+
     :arg list projects: list of projects to include in the MultiJob phase
 
       :Project: * **name** (`str`) -- Project name
@@ -1134,6 +1572,10 @@ def multijob(parser, xml_parent, data):
     XML.SubElement(builder, 'phaseName').text = data['name']
 
     condition = data.get('condition', 'SUCCESSFUL')
+    conditions_available = ('SUCCESSFUL', 'UNSTABLE', 'COMPLETED', 'FAILURE')
+    if condition not in conditions_available:
+        raise JenkinsJobsException('Multijob condition must be one of: %s.'
+                                   % ', '.join(conditions_available))
     XML.SubElement(builder, 'continuationCondition').text = condition
 
     phaseJobs = XML.SubElement(builder, 'phaseJobs')
@@ -1216,6 +1658,36 @@ def multijob(parser, xml_parent, data):
                 phaseJob,
                 'killPhaseOnJobResultCondition'
             ).text = kill_status
+
+
+def config_file_provider(parser, xml_parent, data):
+    """yaml: config-file-provider
+    Provide configuration files (i.e., settings.xml for maven etc.)
+    which will be copied to the job's workspace.
+    Requires the Jenkins :jenkins-wiki:`Config File Provider Plugin
+    <Config+File+Provider+Plugin>`.
+
+    :arg list files: List of managed config files made up of three
+      parameters
+
+      :files: * **file-id** (`str`) -- The identifier for the managed config
+                file
+              * **target** (`str`) -- Define where the file should be created
+                (optional)
+              * **variable** (`str`) -- Define an environment variable to be
+                used (optional)
+
+    Example:
+
+    .. literalinclude::
+       ../../tests/builders/fixtures/config-file-provider01.yaml
+       :language: yaml
+    """
+    cfp = XML.SubElement(xml_parent,
+                         'org.jenkinsci.plugins.configfiles.builder.'
+                         'ConfigFileBuildStep')
+    cfp.set('plugin', 'config-file-provider')
+    config_file_provider_builder(cfp, data)
 
 
 def grails(parser, xml_parent, data):
@@ -1473,13 +1945,10 @@ def shining_panda(parser, xml_parent, data):
     try:
         buildenv = data['build-environment']
     except KeyError:
-        raise JenkinsJobsException("A build-environment is required")
+        raise MissingAttributeError('build-environment')
 
     if buildenv not in envs:
-        errorstring = ("build-environment '%s' is invalid. Must be one of %s."
-                       % (buildenv, ', '.join("'{0}'".format(env)
-                                              for env in envs)))
-        raise JenkinsJobsException(errorstring)
+        raise InvalidAttributeError('build-environment', buildenv, envs)
 
     t = XML.SubElement(xml_parent, '%s%s' %
                        (pluginelementpart, buildenvdict[buildenv]))
@@ -1510,10 +1979,7 @@ def shining_panda(parser, xml_parent, data):
     nature = data.get('nature', 'shell')
     naturetuple = ('shell', 'xshell', 'python')
     if nature not in naturetuple:
-        errorstring = ("nature '%s' is not valid: must be one of %s."
-                       % (nature, ', '.join("'{0}'".format(naturevalue)
-                                            for naturevalue in naturetuple)))
-        raise JenkinsJobsException(errorstring)
+        raise InvalidAttributeError('nature', nature, naturetuple)
     XML.SubElement(t, 'nature').text = nature
     XML.SubElement(t, 'command').text = data.get("command", "")
     ignore_exit_code = data.get('ignore-exit-code', False)
@@ -1551,15 +2017,13 @@ def managed_script(parser, xml_parent, data):
         step = 'WinBatchBuildStep'
         script_tag = 'command'
     else:
-        raise JenkinsJobsException("type entered is not valid must be "
-                                   "one of: script or batch")
+        raise InvalidAttributeError('type', step_type, ['script', 'batch'])
     ms = XML.SubElement(xml_parent,
                         'org.jenkinsci.plugins.managedscripts.' + step)
     try:
         script_id = data['script-id']
     except KeyError:
-        raise JenkinsJobsException("A script-id is required for "
-                                   "managed-script")
+        raise MissingAttributeError('script-id')
     XML.SubElement(ms, script_tag).text = script_id
     args = XML.SubElement(ms, 'buildStepArgs')
     for arg in data.get('args', []):
@@ -1634,8 +2098,7 @@ def cmake(parser, xml_parent, data):
     try:
         source_dir.text = data['source-dir']
     except KeyError:
-        raise JenkinsJobsException("'source-dir' must be set for CMake "
-                                   "builder")
+        raise MissingAttributeError('source-dir')
 
     build_dir = XML.SubElement(cmake, 'buildDir')
     build_dir.text = data.get('build-dir', '')
@@ -1719,7 +2182,9 @@ def dsl(parser, xml_parent, data):
 
     Example:
 
-    .. literalinclude:: /../../tests/builders/fixtures/dsl.yaml
+    .. literalinclude:: /../../tests/builders/fixtures/dsl001.yaml
+       :language: yaml
+    .. literalinclude:: /../../tests/builders/fixtures/dsl002.yaml
        :language: yaml
 
     """
@@ -1731,11 +2196,10 @@ def dsl(parser, xml_parent, data):
         XML.SubElement(dsl, 'scriptText').text = data.get('script-text')
         XML.SubElement(dsl, 'usingScriptText').text = 'true'
     elif data.get('target'):
-        XML.SubElement(dsl, 'target').text = data.get('target')
+        XML.SubElement(dsl, 'targets').text = data.get('target')
         XML.SubElement(dsl, 'usingScriptText').text = 'false'
     else:
-        raise JenkinsJobsException("You must specify either script-text or "
-                                   "a target")
+        raise MissingAttributeError(['script-text', 'target'])
 
     XML.SubElement(dsl, 'ignoreExisting').text = str(data.get(
         'ignore-existing', False)).lower()
@@ -1744,24 +2208,27 @@ def dsl(parser, xml_parent, data):
     removedJobAction = data.get('removed-job-action',
                                 supportedJobActions[0])
     if removedJobAction not in supportedJobActions:
-        raise JenkinsJobsException("removed-job-action must be one "
-                                   "of %s" % ", ".join(supportedJobActions))
+        raise InvalidAttributeError('removed-job-action',
+                                    removedJobAction,
+                                    supportedJobActions)
     XML.SubElement(dsl, 'removedJobAction').text = removedJobAction
 
     supportedViewActions = ['IGNORE', 'DELETE']
     removedViewAction = data.get('removed-view-action',
                                  supportedViewActions[0])
     if removedViewAction not in supportedViewActions:
-        raise JenkinsJobsException("removed-view-action must be one "
-                                   "of %s" % ", ".join(supportedViewActions))
+        raise InvalidAttributeError('removed-view-action',
+                                    removedViewAction,
+                                    supportedViewActions)
     XML.SubElement(dsl, 'removedViewAction').text = removedViewAction
 
     supportedLookupActions = ['JENKINS_ROOT', 'SEED_JOB']
     lookupStrategy = data.get('lookup-strategy',
                               supportedLookupActions[0])
     if lookupStrategy not in supportedLookupActions:
-        raise JenkinsJobsException("lookup-strategy must be one "
-                                   "of %s" % ", ".join(supportedLookupActions))
+        raise InvalidAttributeError('lookup-strategy',
+                                    lookupStrategy,
+                                    supportedLookupActions)
     XML.SubElement(dsl, 'lookupStrategy').text = lookupStrategy
 
     XML.SubElement(dsl, 'additionalClasspath').text = data.get(
@@ -1779,3 +2246,146 @@ def github_notifier(parser, xml_parent, data):
     """
     XML.SubElement(xml_parent,
                    'com.cloudbees.jenkins.GitHubSetCommitStatusBuilder')
+
+
+def ssh_builder(parser, xml_parent, data):
+    """yaml: ssh-builder
+    Executes command on remote host
+    Requires the Jenkins `SSH plugin.
+    <https://wiki.jenkins-ci.org/display/JENKINS/SSH+plugin>`_
+
+    :arg str ssh-user-ip: user@ip:ssh_port of machine that was defined
+                          in jenkins according to SSH plugin instructions
+    :arg str command: command to run on remote server
+
+    Example:
+
+    .. literalinclude:: /../../tests/builders/fixtures/ssh-builder.yaml
+    """
+    builder = XML.SubElement(
+        xml_parent, 'org.jvnet.hudson.plugins.SSHBuilder')
+    try:
+        XML.SubElement(builder, 'siteName').text = str(data['ssh-user-ip'])
+        XML.SubElement(builder, 'command').text = str(data['command'])
+    except KeyError as e:
+        raise MissingAttributeError("'%s'" % e.args[0])
+
+
+def sonar(parser, xml_parent, data):
+    """yaml: sonar
+    Invoke standalone Sonar analysis.
+    Requires the Jenkins `Sonar Plugin.
+    <http://docs.codehaus.org/pages/viewpage.action?pageId=116359341>`_
+
+    :arg str sonar-name: Name of the Sonar installation.
+    :arg str task: Task to run. (optional)
+    :arg str project: Path to Sonar project properties file. (optional)
+    :arg str properties: Sonar configuration properties. (optional)
+    :arg str java-opts: Java options for Sonnar Runner. (optional)
+    :arg str jdk: JDK to use (inherited from the job if omitted). (optional)
+
+    Example:
+
+    .. literalinclude:: /../../tests/builders/fixtures/sonar.yaml
+    """
+    sonar = XML.SubElement(xml_parent,
+                           'hudson.plugins.sonar.SonarRunnerBuilder')
+    XML.SubElement(sonar, 'installationName').text = data['sonar-name']
+    XML.SubElement(sonar, 'task').text = data.get('task', '')
+    XML.SubElement(sonar, 'project').text = data.get('project', '')
+    XML.SubElement(sonar, 'properties').text = data.get('properties', '')
+    XML.SubElement(sonar, 'javaOpts').text = data.get('java-opts', '')
+    if 'jdk' in data:
+        XML.SubElement(sonar, 'jdk').text = data['jdk']
+
+
+def sonatype_clm(parser, xml_parent, data):
+    """yaml: sonatype-clm
+    Requires the Jenkins :jenkins-wiki:`Sonatype CLM Plugin
+    <Sonatype+CLM+%28formerly+Insight+for+CI%29>`.
+
+    :arg str application-name: Determines the policy elements to associate
+        with this build. (Required)
+    :arg bool fail-on-clm-server-failure: Controls the build outcome if there
+        is a failure in communicating with the CLM server. (Default: false)
+    :arg str stage: Controls the stage the policy evaluation will be run
+        against on the CLM server. Valid stages: build, stage-release, release,
+        operate. (Default: build)
+    :arg str scan-targets: Pattern of files to include for scanning. (optional)
+    :arg str module-excludes: Pattern of files to exclude. (optional)
+    :arg str advanced-options: Options to be set on a case-by-case basis as
+        advised by Sonatype Support. (optional)
+
+    Example:
+
+    .. literalinclude:: /../../tests/builders/fixtures/sonatype-clm01.yaml
+    """
+    clm = XML.SubElement(xml_parent,
+                         'com.sonatype.insight.ci.hudson.PreBuildScan')
+    clm.set('plugin', 'sonatype-clm-ci')
+
+    if 'application-name' not in data:
+        raise MissingAttributeError("application-name",
+                                    "builders.sonatype-clm")
+    XML.SubElement(clm, 'billOfMaterialsToken').text = str(
+        data['application-name'])
+    XML.SubElement(clm, 'failOnClmServerFailures').text = str(
+        data.get('fail-on-clm-server-failure', False)).lower()
+
+    SUPPORTED_STAGES = ['build', 'stage-release', 'release', 'operate']
+    stage = str(data.get('stage', 'build')).lower()
+    if stage not in SUPPORTED_STAGES:
+        raise InvalidAttributeError("stage",
+                                    stage,
+                                    "builders.sonatype-clm",
+                                    SUPPORTED_STAGES)
+    XML.SubElement(clm, 'stageId').text = stage
+
+    # Path Configs
+    path_config = XML.SubElement(clm,
+                                 'pathConfig')
+    XML.SubElement(path_config, 'scanTargets').text = str(
+        data.get('scan-targets', '')).lower()
+    XML.SubElement(path_config, 'moduleExcludes').text = str(
+        data.get('module-excludes', '')).lower()
+    XML.SubElement(path_config, 'scanProperties').text = str(
+        data.get('advanced-options', '')).lower()
+
+
+def beaker(parser, xml_parent, data):
+    """yaml: beaker
+    Execute a beaker build step. Requires the Jenkins :jenkins-wiki:`Beaker
+    Builder Plugin <Beaker+Builder+Plugin>`.
+
+    :arg str content: Run job from string
+                      (Alternative: you can choose a path instead)
+    :arg str path: Run job from file
+                   (Alternative: you can choose a content instead)
+    :arg bool download-logs: Download Beaker log files (default false)
+
+    Example:
+
+    .. literalinclude:: ../../tests/builders/fixtures/beaker-path.yaml
+       :language: yaml
+
+    .. literalinclude:: ../../tests/builders/fixtures/beaker-content.yaml
+       :language: yaml
+    """
+    beaker = XML.SubElement(xml_parent, 'org.jenkinsci.plugins.beakerbuilder.'
+                                        'BeakerBuilder')
+    jobSource = XML.SubElement(beaker, 'jobSource')
+    if 'content' in data and 'path' in data:
+        raise JenkinsJobsException("Use just one of 'content' or 'path'")
+    elif 'content' in data:
+        jobSourceClass = "org.jenkinsci.plugins.beakerbuilder.StringJobSource"
+        jobSource.set('class', jobSourceClass)
+        XML.SubElement(jobSource, 'jobContent').text = data['content']
+    elif 'path' in data:
+        jobSourceClass = "org.jenkinsci.plugins.beakerbuilder.FileJobSource"
+        jobSource.set('class', jobSourceClass)
+        XML.SubElement(jobSource, 'jobPath').text = data['path']
+    else:
+        raise JenkinsJobsException("Use one of 'content' or 'path'")
+
+    XML.SubElement(beaker, 'downloadFiles').text = str(data.get(
+        'download-logs', False)).lower()
