@@ -34,7 +34,7 @@ Example::
 
 import xml.etree.ElementTree as XML
 import jenkins_jobs.modules.base
-from jenkins_jobs.errors import JenkinsJobsException
+from jenkins_jobs.errors import InvalidAttributeError, JenkinsJobsException
 import logging
 
 
@@ -411,19 +411,21 @@ def build_blocker(parser, xml_parent, data):
     <Build+Blocker+Plugin>`.
 
     :arg bool use-build-blocker: Enable or disable build blocker
-        (optional) (default true)
+        (default true)
     :arg list blocking-jobs: One regular expression per line
         to select blocking jobs by their names. (required)
 
+    :arg str block-level: block build globally ('GLOBAL') or per node ('NODE')
+        (default 'GLOBAL')
 
-    Example::
+    :arg str queue-scanning: scan build queue for all builds ('ALL') or only
+        buildable builds ('BUILDABLE') (default 'DISABLED'))
 
-        properties:
-          - build-blocker:
-              use-build-blocker: true
-              blocking-jobs:
-                - ".*-deploy"
-                - "^maintenance.*"
+
+    Example:
+
+    .. literalinclude:: \
+            /../../tests/properties/fixtures/build-blocker01.yaml
     """
     blocker = XML.SubElement(xml_parent,
                              'hudson.plugins.'
@@ -438,6 +440,22 @@ def build_blocker(parser, xml_parent, data):
     for value in data['blocking-jobs']:
         jobs = jobs + value + '\n'
     XML.SubElement(blocker, 'blockingJobs').text = jobs
+
+    block_level_list = ('GLOBAL', 'NODE')
+    block_level = data.get('block-level', 'GLOBAL')
+    if block_level not in block_level_list:
+        raise InvalidAttributeError('block-level',
+                                    block_level,
+                                    block_level_list)
+    XML.SubElement(blocker, 'blockLevel').text = block_level
+
+    queue_scanning_list = ('DISABLED', 'ALL', 'BUILDABLE')
+    queue_scanning = data.get('queue-scanning', 'DISABLED')
+    if queue_scanning not in queue_scanning_list:
+        raise InvalidAttributeError('queue-scanning',
+                                    queue_scanning,
+                                    queue_scanning_list)
+    XML.SubElement(blocker, 'scanQueueFor').text = queue_scanning
 
 
 def copyartifact(parser, xml_parent, data):
@@ -561,6 +579,8 @@ def delivery_pipeline(parser, xml_parent, data):
     Requires the Jenkins :jenkins-wiki:`Delivery Pipeline Plugin
     <Delivery+Pipeline+Plugin>`.
 
+    :arg str description: task description template for this job
+        (default: '')
     :arg str stage: Name of the stage for this job (default: '')
     :arg str task: Name of the task for this job (default: '')
 
@@ -575,6 +595,8 @@ def delivery_pipeline(parser, xml_parent, data):
                               'PipelineProperty')
     XML.SubElement(pipeline, 'stageName').text = data.get('stage', '')
     XML.SubElement(pipeline, 'taskName').text = data.get('task', '')
+    XML.SubElement(pipeline, 'descriptionTemplate').text = str(
+        data.get('description', ''))
 
 
 def zeromq_event(parser, xml_parent, data):
@@ -596,6 +618,30 @@ def zeromq_event(parser, xml_parent, data):
                                'org.jenkinsci.plugins.'
                                'ZMQEventPublisher.HudsonNotificationProperty')
     XML.SubElement(zmq_event, 'enabled').text = 'true'
+
+
+def rebuild(parser, xml_parent, data):
+    """yaml: rebuild
+    Requires the Jenkins :jenkins-wiki:`Rebuild Plugin
+    <Rebuild+Plugin>`.
+
+    :arg bool auto-rebuild: Rebuild without asking for parameters
+        (default: False)
+    :arg bool rebuild-disabled: Disable rebuilding for this job
+        (default: False)
+
+    Example:
+
+    .. literalinclude:: \
+            /../../tests/properties/fixtures/rebuild.yaml
+    """
+    sub_element = XML.SubElement(xml_parent,
+                                 'com.sonyericsson.rebuild.RebuildSettings')
+
+    XML.SubElement(sub_element, 'autoRebuild').text = str(
+        data.get('auto-rebuild', False)).lower()
+    XML.SubElement(sub_element, 'rebuildDisabled').text = str(
+        data.get('rebuild-disabled', False)).lower()
 
 
 class Properties(jenkins_jobs.modules.base.Base):

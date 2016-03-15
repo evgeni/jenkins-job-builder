@@ -21,8 +21,8 @@ Example:
 
 :Job Parameters:
     * **project-type**:
-      Defaults to "freestyle", but "maven" as well as "multijob", "flow" or
-      "externaljob" can also be specified.
+      Defaults to "freestyle", but "maven" as well as "multijob", "flow",
+      "workflow" or "externaljob" can also be specified.
 
     * **defaults**:
       Specifies a set of :ref:`defaults` to use for this job, defaults to
@@ -94,6 +94,10 @@ Example:
       The Logrotate section allows you to automatically remove old build
       history. It adds the ``logrotate`` attribute to the :ref:`Job`
       definition. All logrotate attributes default to "-1" (keep forever).
+
+    * **raw**:
+      If present, this section should contain a single **xml** entry. This XML
+      will be inserted at the top-level of the :ref:`Job` definition.
 
 """
 
@@ -170,6 +174,9 @@ class General(jenkins_jobs.modules.base.Base):
             lr_adays.text = str(logrotate.get('artifactDaysToKeep', -1))
             lr_anum = XML.SubElement(lr_xml, 'artifactNumToKeep')
             lr_anum.text = str(logrotate.get('artifactNumToKeep', -1))
+
+        if 'raw' in data:
+            raw(parser, xml, data['raw'])
 
 
 def raw(parser, xml_parent, data):
