@@ -25,11 +25,12 @@ Jenkins notification plugin.
 """
 
 import xml.etree.ElementTree as XML
+
 import jenkins_jobs.modules.base
-from jenkins_jobs.errors import JenkinsJobsException
+from jenkins_jobs.modules.helpers import convert_mapping_to_xml
 
 
-def http_endpoint(parser, xml_parent, data):
+def http_endpoint(registry, xml_parent, data):
     """yaml: http
     Defines an HTTP notification endpoint.
     Requires the Jenkins :jenkins-wiki:`Notification Plugin
@@ -55,29 +56,17 @@ def http_endpoint(parser, xml_parent, data):
                                       'com.tikal.hudson.plugins.notification.'
                                       'Endpoint')
     supported_formats = ['JSON', 'XML']
-    format = data.get('format', 'JSON').upper()
-    if format not in supported_formats:
-        raise JenkinsJobsException(
-            "format must be one of %s" %
-            ", ".join(supported_formats))
-    else:
-        XML.SubElement(endpoint_element, 'format').text = format
-
-    XML.SubElement(endpoint_element, 'protocol').text = 'HTTP'
-
     supported_events = ['started', 'completed', 'finalized', 'all']
+    fmt = data.get('format', 'JSON').upper()
     event = data.get('event', 'all').lower()
-    if event not in supported_events:
-        raise JenkinsJobsException(
-            "event must be one of %s" %
-            ", ".join(supported_events))
-    else:
-        XML.SubElement(endpoint_element, 'event').text = event
-
-    XML.SubElement(endpoint_element, 'timeout').text = str(data.get('timeout',
-                                                           30000))
-    XML.SubElement(endpoint_element, 'url').text = data['url']
-    XML.SubElement(endpoint_element, 'loglines').text = str(data.get('log', 0))
+    mapping = [
+        ('', 'format', fmt, supported_formats),
+        ('', 'protocol', 'HTTP'),
+        ('', 'event', event, supported_events),
+        ('timeout', 'timeout', 30000),
+        ('url', 'url', None),
+        ('log', 'loglines', 0)]
+    convert_mapping_to_xml(endpoint_element, data, mapping, fail_required=True)
 
 
 class Notifications(jenkins_jobs.modules.base.Base):
@@ -86,7 +75,7 @@ class Notifications(jenkins_jobs.modules.base.Base):
     component_type = 'notification'
     component_list_type = 'notifications'
 
-    def gen_xml(self, parser, xml_parent, data):
+    def gen_xml(self, xml_parent, data):
         properties = xml_parent.find('properties')
         if properties is None:
             properties = XML.SubElement(xml_parent, 'properties')
@@ -101,4 +90,4 @@ class Notifications(jenkins_jobs.modules.base.Base):
 
             for endpoint in notifications:
                 self.registry.dispatch('notification',
-                                       parser, endpoints_element, endpoint)
+                                       endpoints_element, endpoint)

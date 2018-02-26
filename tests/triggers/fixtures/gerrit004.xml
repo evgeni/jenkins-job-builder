@@ -29,6 +29,7 @@
               <pattern>refactor-xy**</pattern>
             </com.sonyericsson.hudson.plugins.gerrit.trigger.hudsontrigger.data.Topic>
           </topics>
+          <disableStrictForbiddenFileVerification>false</disableStrictForbiddenFileVerification>
         </com.sonyericsson.hudson.plugins.gerrit.trigger.hudsontrigger.data.GerritProject>
       </gerritProjects>
       <skipVote>
@@ -46,6 +47,7 @@
       <notificationLevel>ALL</notificationLevel>
       <dynamicTriggerConfiguration>True</dynamicTriggerConfiguration>
       <triggerConfigURL>http://myhost/mytrigger</triggerConfigURL>
+      <triggerInformationAction/>
       <allowTriggeringUnreviewedPatches>true</allowTriggeringUnreviewedPatches>
       <triggerOnEvents>
         <com.sonyericsson.hudson.plugins.gerrit.trigger.hudsontrigger.events.PluginPatchsetCreatedEvent>

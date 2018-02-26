@@ -29,20 +29,20 @@ Example::
       - timed: '@daily'
 """
 
+import logging
+import pkg_resources
+import re
+import sys
+import xml.etree.ElementTree as XML
 
 import six
-import xml.etree.ElementTree as XML
+
+from jenkins_jobs.errors import InvalidAttributeError
+from jenkins_jobs.errors import JenkinsJobsException
+from jenkins_jobs.errors import MissingAttributeError
 import jenkins_jobs.modules.base
 from jenkins_jobs.modules import hudson_model
-from jenkins_jobs.errors import (InvalidAttributeError,
-                                 JenkinsJobsException,
-                                 MissingAttributeError)
-import logging
-import re
-try:
-    from collections import OrderedDict
-except ImportError:
-    from ordereddict import OrderedDict
+from jenkins_jobs.modules.helpers import convert_mapping_to_xml
 
 logger = logging.getLogger(str(__name__))
 
@@ -60,8 +60,9 @@ def gerrit_handle_legacy_configuration(data):
         for old_key in old_keys:
             if old_key in d:
                 new_key = hyphenize(old_key)
-                logger.warn("'%s' is deprecated and will be removed after "
-                            "1.0.0, please use '%s' instead", old_key, new_key)
+                logger.warning(
+                    "'%s' is deprecated and will be removed after "
+                    "1.0.0, please use '%s' instead", old_key, new_key)
                 d[new_key] = d[old_key]
                 del d[old_key]
 
@@ -82,7 +83,7 @@ def gerrit_handle_legacy_configuration(data):
         'skipVote',
     ])
 
-    for project in data['projects']:
+    for project in data.get('projects', []):
         convert_dict(project, [
             'projectCompareType',
             'projectPattern',
@@ -90,14 +91,17 @@ def gerrit_handle_legacy_configuration(data):
             'branchPattern',
         ])
 
-    old_format_events = OrderedDict(
+    mapping_obj_type = type(data)
+
+    old_format_events = mapping_obj_type(
         (key, should_register) for key, should_register in six.iteritems(data)
         if key.startswith('trigger-on-'))
     trigger_on = data.setdefault('trigger-on', [])
     if old_format_events:
-        logger.warn("The events: %s; which you used is/are deprecated. "
-                    "Please use 'trigger-on' instead.",
-                    ', '.join(old_format_events))
+        logger.warning(
+            "The events: %s; which you used is/are deprecated. "
+            "Please use 'trigger-on' instead.",
+            ', '.join(old_format_events))
 
     if old_format_events and trigger_on:
         raise JenkinsJobsException(
@@ -111,11 +115,18 @@ def gerrit_handle_legacy_configuration(data):
 
     for idx, event in enumerate(trigger_on):
         if event == 'comment-added-event':
-            trigger_on[idx] = events = OrderedDict()
-            events['comment-added-event'] = OrderedDict((
-                ('approval-category', data['trigger-approval-category']),
-                ('approval-value', data['trigger-approval-value'])
-            ))
+            trigger_on[idx] = events = mapping_obj_type()
+            try:
+                events['comment-added-event'] = mapping_obj_type((
+                    ('approval-category', data['trigger-approval-category']),
+                    ('approval-value', data['trigger-approval-value'])
+                ))
+            except KeyError:
+                raise JenkinsJobsException(
+                    'The comment-added-event trigger requires which approval '
+                    'category and value you want to trigger the job. '
+                    'It should be specified by the approval-category '
+                    'and approval-value properties.')
 
 
 def build_gerrit_triggers(xml_parent, data):
@@ -137,8 +148,9 @@ def build_gerrit_triggers(xml_parent, data):
         if isinstance(event, six.string_types):
             tag_name = available_simple_triggers.get(event)
             if event == 'patchset-uploaded-event':
-                logger.warn("'%s' is deprecated. Use 'patchset-created-event' "
-                            "format instead.", event)
+                logger.warning(
+                    "'%s' is deprecated. Use 'patchset-created-event' "
+                    "format instead.", event)
 
             if not tag_name:
                 known = ', '.join(available_simple_triggers.keys()
@@ -155,24 +167,23 @@ def build_gerrit_triggers(xml_parent, data):
                 pc = XML.SubElement(
                     trigger_on_events,
                     '%s.%s' % (tag_namespace, 'PluginPatchsetCreatedEvent'))
-                XML.SubElement(pc, 'excludeDrafts').text = str(
-                    pce.get('exclude-drafts', False)).lower()
-                XML.SubElement(pc, 'excludeTrivialRebase').text = str(
-                    pce.get('exclude-trivial-rebase', False)).lower()
-                XML.SubElement(pc, 'excludeNoCodeChange').text = str(
-                    pce.get('exclude-no-code-change', False)).lower()
+                mapping = [
+                    ('exclude-drafts', 'excludeDrafts', False),
+                    ('exclude-trivial-rebase', 'excludeTrivialRebase', False),
+                    ('exclude-no-code-change', 'excludeNoCodeChange', False)]
+                convert_mapping_to_xml(pc, pce, mapping, fail_required=True)
 
             if 'comment-added-event' in event.keys():
                 comment_added_event = event['comment-added-event']
                 cadded = XML.SubElement(
                     trigger_on_events,
                     '%s.%s' % (tag_namespace, 'PluginCommentAddedEvent'))
-                XML.SubElement(cadded, 'verdictCategory').text = \
-                    comment_added_event['approval-category']
-                XML.SubElement(
-                    cadded,
-                    'commentAddedTriggerApprovalValue').text = \
-                    str(comment_added_event['approval-value'])
+                mapping = [
+                    ('approval-category', 'verdictCategory', None),
+                    ('approval-value',
+                        'commentAddedTriggerApprovalValue', None)]
+                convert_mapping_to_xml(cadded,
+                    comment_added_event, mapping, fail_required=True)
 
             if 'comment-added-contains-event' in event.keys():
                 comment_added_event = event['comment-added-contains-event']
@@ -199,7 +210,7 @@ def build_gerrit_skip_votes(xml_parent, data):
             XML.SubElement(skip_vote_node, tag_name).text = 'false'
 
 
-def gerrit(parser, xml_parent, data):
+def gerrit(registry, xml_parent, data):
     """yaml: gerrit
 
     Trigger on a Gerrit event.
@@ -218,11 +229,11 @@ def gerrit(parser, xml_parent, data):
            creation.
 
            :Patchset created:
-               * **exclude-drafts** (`bool`) -- exclude drafts (Default: False)
+               * **exclude-drafts** (`bool`) -- exclude drafts (default false)
                * **exclude-trivial-rebase** (`bool`) -- exclude trivial rebase
-                 (Default: False)
+                 (default false)
                * **exclude-no-code-change** (`bool`) -- exclude no code change
-                 (Default: False)
+                 (default false)
 
            Exclude drafts|trivial-rebase|no-code-change needs
            Gerrit Trigger v2.12.0
@@ -364,10 +375,19 @@ def gerrit(parser, xml_parent, data):
                 * **topics** (`list`) -- List of topics to match
                   (optional)
 
-                  :File Path: * **compare-type** (`str`) -- ''PLAIN'', ''ANT''
-                                or ''REG_EXP'' (optional) (default ''PLAIN'')
-                              * **pattern** (`str`) -- Topic name pattern to
-                                match
+                  :Topic: * **compare-type** (`str`) -- ''PLAIN'', ''ANT'' or
+                            ''REG_EXP'' (optional) (default ''PLAIN'')
+                          * **pattern** (`str`) -- Topic name pattern to
+                            match
+
+                * **disable-strict-forbidden-file-verification** (`bool`) --
+                      Enabling this option will allow an event to trigger a
+                      build if the event contains BOTH one or more wanted file
+                      paths AND one or more forbidden file paths.  In other
+                      words, with this option, the build will not get
+                      triggered if the change contains only forbidden files,
+                      otherwise it will get triggered. Requires plugin
+                      version >= 2.16.0 (default false)
 
     :arg dict skip-vote: map of build outcomes for which Jenkins must skip
         vote. Requires Gerrit Trigger Plugin version >= 2.7.0
@@ -445,7 +465,7 @@ def gerrit(parser, xml_parent, data):
 
     gerrit_handle_legacy_configuration(data)
 
-    projects = data['projects']
+    projects = data.get('projects', [])
     gtrig = XML.SubElement(xml_parent,
                            'com.sonyericsson.hudson.plugins.gerrit.trigger.'
                            'hudsontrigger.GerritTrigger')
@@ -456,7 +476,8 @@ def gerrit(parser, xml_parent, data):
                                'com.sonyericsson.hudson.plugins.gerrit.'
                                'trigger.hudsontrigger.data.GerritProject')
         XML.SubElement(gproj, 'compareType').text = get_compare_type(
-            'project-compare-type', project['project-compare-type'])
+            'project-compare-type', project.get(
+                'project-compare-type', 'PLAIN'))
         XML.SubElement(gproj, 'pattern').text = project['project-pattern']
 
         branches = XML.SubElement(gproj, 'branches')
@@ -471,17 +492,19 @@ def gerrit(parser, xml_parent, data):
                            'branches section'
             else:
                 warning += 'please use branches section instead'
-            logger.warn(warning)
+            logger.warning(warning)
         if not project_branches:
             project_branches = [
-                {'branch-compare-type': project['branch-compare-type'],
+                {'branch-compare-type': project.get(
+                    'branch-compare-type', 'PLAIN'),
                  'branch-pattern': project['branch-pattern']}]
         for branch in project_branches:
             gbranch = XML.SubElement(
                 branches, 'com.sonyericsson.hudson.plugins.'
                 'gerrit.trigger.hudsontrigger.data.Branch')
             XML.SubElement(gbranch, 'compareType').text = get_compare_type(
-                'branch-compare-type', branch['branch-compare-type'])
+                'branch-compare-type', branch.get(
+                    'branch-compare-type', 'PLAIN'))
             XML.SubElement(gbranch, 'pattern').text = branch['branch-pattern']
 
         project_file_paths = project.get('file-paths', [])
@@ -523,19 +546,21 @@ def gerrit(parser, xml_parent, data):
                                                                'PLAIN'))
                 XML.SubElement(topic_tag, 'pattern').text = topic['pattern']
 
+        XML.SubElement(gproj,
+                       'disableStrictForbiddenFileVerification').text = str(
+            project.get('disable-strict-forbidden-file-verification',
+                        False)).lower()
+
     build_gerrit_skip_votes(gtrig, data)
-    XML.SubElement(gtrig, 'silentMode').text = str(
-        data.get('silent', False)).lower()
-    XML.SubElement(gtrig, 'silentStartMode').text = str(
-        data.get('silent-start', False)).lower()
-    XML.SubElement(gtrig, 'escapeQuotes').text = str(
-        data.get('escape-quotes', True)).lower()
-    XML.SubElement(gtrig, 'noNameAndEmailParameters').text = str(
-        data.get('no-name-and-email', False)).lower()
-    XML.SubElement(gtrig, 'readableMessage').text = str(
-        data.get('readable-message', False)).lower()
-    XML.SubElement(gtrig, 'dependencyJobsNames').text = str(
-        data.get('dependency-jobs', ''))
+    general_mappings = [
+        ('silent', 'silentMode', False),
+        ('silent-start', 'silentStartMode', False),
+        ('escape-quotes', 'escapeQuotes', True),
+        ('no-name-and-email', 'noNameAndEmailParameters', False),
+        ('readable-message', 'readableMessage', False),
+        ('dependency-jobs', 'dependencyJobsNames', ''),
+    ]
+    convert_mapping_to_xml(gtrig, data, general_mappings, fail_required=True)
     notification_levels = ['NONE', 'OWNER', 'OWNER_REVIEWERS', 'ALL',
                            'SERVER_DEFAULT']
     notification_level = data.get('notification-level', 'SERVER_DEFAULT')
@@ -550,6 +575,8 @@ def gerrit(parser, xml_parent, data):
         data.get('dynamic-trigger-enabled', False))
     XML.SubElement(gtrig, 'triggerConfigURL').text = str(
         data.get('dynamic-trigger-url', ''))
+    XML.SubElement(gtrig, 'triggerInformationAction').text = str(
+        data.get('trigger-information-action', ''))
     XML.SubElement(gtrig, 'allowTriggeringUnreviewedPatches').text = str(
         data.get('trigger-for-unreviewed-patches', False)).lower()
     build_gerrit_triggers(gtrig, data)
@@ -579,24 +606,67 @@ def gerrit(parser, xml_parent, data):
                 # str(int(x)) makes input values like '+1' work
                 XML.SubElement(gtrig, xmlkey).text = str(
                     int(data.get(yamlkey)))
-    XML.SubElement(gtrig, 'buildStartMessage').text = str(
-        data.get('start-message', ''))
-    XML.SubElement(gtrig, 'buildFailureMessage').text = \
-        data.get('failure-message', '')
-    XML.SubElement(gtrig, 'buildSuccessfulMessage').text = str(
-        data.get('successful-message', ''))
-    XML.SubElement(gtrig, 'buildUnstableMessage').text = str(
-        data.get('unstable-message', ''))
-    XML.SubElement(gtrig, 'buildNotBuiltMessage').text = str(
-        data.get('notbuilt-message', ''))
-    XML.SubElement(gtrig, 'buildUnsuccessfulFilepath').text = str(
-        data.get('failure-message-file', ''))
-    XML.SubElement(gtrig, 'customUrl').text = str(data.get('custom-url', ''))
-    XML.SubElement(gtrig, 'serverName').text = str(
-        data.get('server-name', '__ANY__'))
+    message_mappings = [
+        ('start-message', 'buildStartMessage', ''),
+        ('failure-message', 'buildFailureMessage', ''),
+        ('successful-message', 'buildSuccessfulMessage', ''),
+        ('unstable-message', 'buildUnstableMessage', ''),
+        ('notbuilt-message', 'buildNotBuiltMessage', ''),
+        ('failure-message-file', 'buildUnsuccessfulFilepath', ''),
+        ('custom-url', 'customUrl', ''),
+        ('server-name', 'serverName', '__ANY__'),
+    ]
+    convert_mapping_to_xml(gtrig, data, message_mappings, fail_required=True)
 
 
-def pollscm(parser, xml_parent, data):
+def dockerhub_notification(registry, xml_parent, data):
+    """yaml: dockerhub-notification
+    The job will get triggered when Docker Hub/Registry notifies
+    that Docker image(s) used in this job has been rebuilt.
+
+    Requires the Jenkins :jenkins-wiki:`CloudBees Docker Hub Notification
+    <CloudBees+Docker+Hub+Notification>`.
+
+    :arg bool referenced-image: Trigger the job based on repositories
+        used by any compatible docker plugin in this job. (default true)
+    :arg list repositories: Specified repositories to trigger the job.
+            (default [])
+
+    Minimal Example:
+
+    .. literalinclude::
+       /../../tests/triggers/fixtures/dockerhub-notification-minimal.yaml
+       :language: yaml
+
+    Full Example:
+
+    .. literalinclude::
+       /../../tests/triggers/fixtures/dockerhub-notification-full.yaml
+       :language: yaml
+    """
+    dockerhub = XML.SubElement(xml_parent, 'org.jenkinsci.plugins.'
+                               'registry.notification.DockerHubTrigger')
+    dockerhub.set('plugin', 'dockerhub-notification')
+
+    option = XML.SubElement(dockerhub, 'options', {'class': 'vector'})
+
+    if data.get('referenced-image'):
+        XML.SubElement(option, 'org.jenkinsci.plugins.'
+                       'registry.notification.'
+                       'opt.impl.TriggerForAllUsedInJob')
+    repos = data.get('repositories', [])
+    if repos:
+        specified_names = XML.SubElement(option,
+                                         'org.jenkinsci.plugins.registry.'
+                                         'notification.opt.impl.'
+                                         'TriggerOnSpecifiedImageNames')
+
+        repo_tag = XML.SubElement(specified_names, 'repoNames')
+        for repo in repos:
+            XML.SubElement(repo_tag, 'string').text = repo
+
+
+def pollscm(registry, xml_parent, data):
     """yaml: pollscm
     Poll the SCM to determine if there has been a change.
 
@@ -626,9 +696,10 @@ def pollscm(parser, xml_parent, data):
         raise MissingAttributeError(e)
     except TypeError:
         # To keep backward compatibility
-        logger.warn("Your pollscm usage is deprecated, please use"
-                    " the syntax described in the documentation"
-                    " instead")
+        logger.warning(
+            "Your pollscm usage is deprecated, please use"
+            " the syntax described in the documentation"
+            " instead")
         cron = data
         ipch = 'false'
 
@@ -653,7 +724,7 @@ def build_content_type(xml_parent, entries, namespace, collection_suffix,
             XML.SubElement(content_entry, element_name).text = entry
 
 
-def pollurl(parser, xml_parent, data):
+def pollurl(registry, xml_parent, data):
     """yaml: pollurl
     Trigger when the HTTP response from a URL changes.
     Requires the Jenkins :jenkins-wiki:`URLTrigger Plugin <URLTrigger+Plugin>`.
@@ -755,22 +826,72 @@ def pollurl(parser, xml_parent, data):
                                    'ContentEntry', *content_type[0:3])
 
 
-def schedule_failed_builds(parser, xml_parent, data):
-    """yaml: schedule-failed-builds
-    Trigger builds after failure (requires ScheduleFailedBuilds plugin)
+def jms_messaging(registry, xml_parent, data):
+    """yaml: jms-messaging
+    The JMS Messaging Plugin provides the following functionality:
+     - A build trigger to submit jenkins jobs upon receipt
+       of a matching message.
+     - A builder that may be used to submit a message to the topic
+       upon the completion of a job
+     - A post-build action that may be used to submit a message to the topic
+       upon the completion of a job
 
-    :Parameter: spec for retrying failed builds (cron syntax)
+    JMS Messaging provider types supported:
+        - ActiveMQ
+        - FedMsg
 
-    Example::
+    Requires the Jenkins :jenkins-wiki:`JMS Messaging Plugin
+    Pipeline Plugin <JMS+Messaging+Plugin>`.
 
-      triggers:
-        - schedule-failed-builds: "* * * * *"
+    :arg str selector: The JSON or YAML formatted text that conforms to
+        the schema for defining the various OpenShift resources. (default '')
+        note: topic needs to be in double quotes
+        ex. topic = "org.fedoraproject.prod.fedimg.image.upload"
+    :arg str provider-name: Name of message provider setup in the
+        global config. (default '')
+    :arg list checks: List of checks to monitor. (default [])
+    :arg str field: Check the body of messages for a field. (default '')
+    :arg str expected-value: Expected value for the field. regex (default '')
+
+
+    Full Example:
+
+    .. literalinclude::
+        ../../tests/triggers/fixtures/jms-messaging001.yaml
+       :language: yaml
+
+    Minimal Example:
+
+    .. literalinclude::
+        ../../tests/triggers/fixtures/jms-messaging002.yaml
+       :language: yaml
     """
-    sfbtrig = XML.SubElement(xml_parent, 'com.progress.hudson.ScheduleFailedBuildsTrigger')
-    XML.SubElement(sfbtrig, 'spec').text = data
+    namespace = 'com.redhat.jenkins.plugins.ci.'
+    jmsm = XML.SubElement(xml_parent,
+                          namespace + 'CIBuildTrigger')
+
+    mapping = [
+        # option, xml name, default value
+        ("spec", 'spec', ''),
+        ("selector", 'selector', ''),
+        ("provider-name", 'providerName', ''),
+    ]
+    convert_mapping_to_xml(jmsm, data, mapping, fail_required=True)
+
+    checks = data.get('checks', [])
+    if len(checks) > 0:
+        msgchecks = XML.SubElement(jmsm, 'checks')
+        for check in checks:
+            msgcheck = XML.SubElement(msgchecks, namespace
+                                      + 'messaging.checks.MsgCheck')
+            mapping = [
+                ('field', 'field', ''),
+                ('expected-value', 'expectedValue', '')]
+            convert_mapping_to_xml(
+                msgcheck, check, mapping, fail_required=True)
 
 
-def timed(parser, xml_parent, data):
+def timed(registry, xml_parent, data):
     """yaml: timed
     Trigger builds at certain times.
 
@@ -785,7 +906,7 @@ def timed(parser, xml_parent, data):
     XML.SubElement(scmtrig, 'spec').text = data
 
 
-def bitbucket(parser, xml_parent, data):
+def bitbucket(registry, xml_parent, data):
     """yaml: bitbucket
     Trigger a job when bitbucket repository is pushed to.
     Requires the Jenkins :jenkins-wiki:`BitBucket Plugin
@@ -800,7 +921,7 @@ def bitbucket(parser, xml_parent, data):
     XML.SubElement(bbtrig, 'spec').text = ''
 
 
-def github(parser, xml_parent, data):
+def github(registry, xml_parent, data):
     """yaml: github
     Trigger a job when github repository is pushed to.
     Requires the Jenkins :jenkins-wiki:`GitHub Plugin <GitHub+Plugin>`.
@@ -815,7 +936,7 @@ def github(parser, xml_parent, data):
     XML.SubElement(ghtrig, 'spec').text = ''
 
 
-def github_pull_request(parser, xml_parent, data):
+def github_pull_request(registry, xml_parent, data):
     """yaml: github-pull-request
     Build pull requests in github and report results.
     Requires the Jenkins :jenkins-wiki:`GitHub Pull Request Builder Plugin
@@ -831,6 +952,12 @@ def github_pull_request(parser, xml_parent, data):
         in the pull request will trigger a build (optional)
     :arg bool only-trigger-phrase: only commenting the trigger phrase
         in the pull request will trigger a build (default false)
+    :arg string skip-build-phrase: when filled, adding this phrase to
+        the pull request title or body will not trigger a build (optional)
+    :arg string black-list-labels: list of GitHub labels for which the build
+        should not be triggered (optional)
+    :arg string white-list-labels: list of GitHub labels for which the build
+        should only be triggered. (Leave blank for 'any') (optional)
     :arg bool github-hooks: use github hook (default false)
     :arg bool permit-all: build every pull request automatically
         without asking (default false)
@@ -850,6 +977,8 @@ def github_pull_request(parser, xml_parent, data):
     :arg string started-status: the status comment to set when the build has
         been started (optional)
     :arg string status-url: the status URL to set (optional)
+    :arg bool status-add-test-results: add test result one-liner to status
+        message (optional)
     :arg string success-status: the status message to set if the job succeeds
         (optional)
     :arg string failure-status: the status message to set if the job fails
@@ -868,6 +997,7 @@ def github_pull_request(parser, xml_parent, data):
     Example:
 
     .. literalinclude:: /../../tests/triggers/fixtures/github-pull-request.yaml
+
     """
     ghprb = XML.SubElement(xml_parent, 'org.jenkinsci.plugins.ghprb.'
                            'GhprbTrigger')
@@ -880,6 +1010,10 @@ def github_pull_request(parser, xml_parent, data):
     XML.SubElement(ghprb, 'whitelist').text = white_string
     org_string = "\n".join(data.get('org-list', []))
     XML.SubElement(ghprb, 'orgslist').text = org_string
+    white_list_labels_string = "\n".join(data.get('white-list-labels', []))
+    XML.SubElement(ghprb, 'whiteListLabels').text = white_list_labels_string
+    black_list_labels_string = "\n".join(data.get('black-list-labels', []))
+    XML.SubElement(ghprb, 'blackListLabels').text = black_list_labels_string
     XML.SubElement(ghprb, 'cron').text = data.get('cron', '')
 
     build_desc_template = data.get('build-desc-template', '')
@@ -889,6 +1023,8 @@ def github_pull_request(parser, xml_parent, data):
 
     XML.SubElement(ghprb, 'triggerPhrase').text = \
         data.get('trigger-phrase', '')
+    XML.SubElement(ghprb, 'skipBuildPhrase').text = str(
+        data.get('skip-build-phrase', '')).lower()
     XML.SubElement(ghprb, 'onlyTriggerPhrase').text = str(
         data.get('only-trigger-phrase', False)).lower()
     XML.SubElement(ghprb, 'useGitHubHooks').text = str(
@@ -915,6 +1051,7 @@ def github_pull_request(parser, xml_parent, data):
     triggered_status = data.get('triggered-status', '')
     started_status = data.get('started-status', '')
     status_url = data.get('status-url', '')
+    status_add_test_results = data.get('status-add-test-results', '')
     success_status = data.get('success-status', '')
     failure_status = data.get('failure-status', '')
     error_status = data.get('error-status', '')
@@ -925,6 +1062,7 @@ def github_pull_request(parser, xml_parent, data):
         triggered_status or
         started_status or
         status_url or
+        status_add_test_results or
         success_status or
         failure_status or
         error_status
@@ -937,11 +1075,21 @@ def github_pull_request(parser, xml_parent, data):
         error_status
     )
 
+    # is comment handling required?
+    success_comment = data.get('success-comment', '')
+    failure_comment = data.get('failure-comment', '')
+    error_comment = data.get('error-comment', '')
+    requires_job_comment = (
+        success_comment or
+        failure_comment or
+        error_comment
+    )
+
     cancel_builds_on_update = data.get('cancel-builds-on-update', False)
 
     # We want to have only one 'extensions' subelement, even if status
     # handling, comment handling and other extensions are enabled.
-    if requires_status or cancel_builds_on_update:
+    if requires_status or requires_job_comment or cancel_builds_on_update:
         extensions = XML.SubElement(ghprb, 'extensions')
 
     # Both comment and status elements have this same type.  Using a const is
@@ -967,6 +1115,9 @@ def github_pull_request(parser, xml_parent, data):
         if status_url:
             XML.SubElement(simple_status, 'statusUrl').text = str(
                 status_url)
+        if status_add_test_results:
+            XML.SubElement(simple_status, 'addTestResults').text = str(
+                status_add_test_results).lower()
 
         if requires_status_message:
             completed_elem = XML.SubElement(simple_status, 'completedStatus')
@@ -985,19 +1136,8 @@ def github_pull_request(parser, xml_parent, data):
                 XML.SubElement(error_elem, 'message').text = str(error_status)
                 XML.SubElement(error_elem, 'result').text = 'ERROR'
 
-    # comment fields
-    success_comment = data.get('success-comment', '')
-    failure_comment = data.get('failure-comment', '')
-    error_comment = data.get('error-comment', '')
-    requires_job_comment = (
-        success_comment or
-        failure_comment or
-        error_comment
-    )
-
     # job comment handling
     if requires_job_comment:
-        extensions = XML.SubElement(ghprb, 'extensions')
         build_status = XML.SubElement(extensions,
                                       'org.jenkinsci.plugins.ghprb.extensions'
                                       '.comments.'
@@ -1025,14 +1165,28 @@ def github_pull_request(parser, xml_parent, data):
                        'build.GhprbCancelBuildsOnUpdate')
 
 
-def gitlab_merge_request(parser, xml_parent, data):
+def gitlab_merge_request(registry, xml_parent, data):
     """yaml: gitlab-merge-request
     Build merge requests in gitlab and report results.
     Requires the Jenkins :jenkins-wiki:`Gitlab MergeRequest Builder Plugin.
     <Gitlab+Merge+Request+Builder+Plugin>`.
 
-    :arg string cron: cron syntax of when to run (required)
-    :arg string project-path: gitlab-relative path to project (required)
+    :arg string cron: Cron syntax of when to run (required)
+    :arg string project-path: Gitlab-relative path to project (required)
+    :arg string use-http-url: Use the HTTP(S) URL to fetch/clone repository
+        (default false)
+    :arg string assignee-filter: Only MRs with this assigned user will
+        trigger the build automatically (default 'jenkins')
+    :arg string tag-filter: Only MRs with this label will trigger the build
+        automatically (default 'Build')
+    :arg string trigger-comment: Force build if this comment is the last
+        in merge reguest (default '')
+    :arg string publish-build-progress-messages: Publish build progress
+        messages (except build failed) (default true)
+    :arg string auto-close-failed: On failure, auto close the request
+        (default false)
+    :arg string auto-merge-passed: On success, auto merge the request
+        (default false)
 
     Example:
 
@@ -1041,51 +1195,111 @@ def gitlab_merge_request(parser, xml_parent, data):
     """
     ghprb = XML.SubElement(xml_parent, 'org.jenkinsci.plugins.gitlab.'
                            'GitlabBuildTrigger')
-    if not data.get('cron', None):
-        raise jenkins_jobs.errors.JenkinsJobsException(
-            'gitlab-merge-request is missing "cron"')
-    if not data.get('project-path', None):
-        raise jenkins_jobs.errors.JenkinsJobsException(
-            'gitlab-merge-request is missing "project-path"')
 
     # Because of a design limitation in the GitlabBuildTrigger Jenkins plugin
     # both 'spec' and '__cron' have to be set to the same value to have them
     # take effect. Also, cron and projectPath are prefixed with underscores
     # in the plugin, but spec is not.
-    XML.SubElement(ghprb, 'spec').text = data.get('cron')
-    XML.SubElement(ghprb, '__cron').text = data.get('cron')
-    XML.SubElement(ghprb, '__projectPath').text = data.get('project-path')
+    mapping = [
+        ('cron', 'spec', None),
+        ('cron', '__cron', None),
+        ('project-path', '__projectPath', None),
+        ('use-http-url', '__useHttpUrl', False),
+        ('assignee-filter', '__assigneeFilter', 'jenkins'),
+        ('tag-filter', '__tagFilter', 'Build'),
+        ('trigger-comment', '__triggerComment', ''),
+        ('publish-build-progress-messages', '__publishBuildProgressMessages',
+         True),
+        ('auto-close-failed', '__autoCloseFailed', False),
+        ('auto-merge-passed', '__autoMergePassed', False)
+    ]
+    convert_mapping_to_xml(ghprb, data, mapping, True)
 
 
-def gitlab(parser, xml_parent, data):
+def gitlab(registry, xml_parent, data):
     """yaml: gitlab
-    Makes Jenkins act like a GitlabCI server
-    Requires the Jenkins :jenkins-wiki:`Gitlab Plugin.
-    <Gitlab+Plugin>`.
+    Makes Jenkins act like a GitLab CI server.
+    Requires the Jenkins :jenkins-wiki:`GitLab Plugin
+    <GitLab+Plugin>`.
 
-    :arg bool trigger-push: Build on Push Events (default: true)
-    :arg bool trigger-merge-request: Build on Merge Request Events (default:
-        True)
-    :arg bool trigger-open-merge-request-push: Rebuild open Merge Requests on
-        Push Events (default: True)
-    :arg bool ci-skip: Enable [ci-skip] (default True)
+    :arg bool trigger-push: Build on Push Events (default true)
+    :arg bool trigger-merge-request: Build on Merge Request Events (default
+        true)
+    :arg str trigger-open-merge-request-push: Rebuild open Merge Requests
+        on Push Events.
+
+        :trigger-open-merge-request-push values (< 1.1.26):
+            * **true** (default)
+            * **false**
+        :trigger-open-merge-request-push values (>= 1.1.26):
+            * **never** (default)
+            * **source**
+            * **both**
+    :arg bool trigger-note: Build when comment is added with defined phrase
+        (>= 1.2.4) (default true)
+    :arg str note-regex: Phrase that triggers the build (>= 1.2.4) (default
+        'Jenkins please retry a build')
+    :arg bool ci-skip: Enable skipping builds of commits that contain
+        [ci-skip] in the commit message (default true)
+    :arg bool wip-skip: Enable skipping builds of WIP Merge Requests (>= 1.2.4)
+        (default true)
     :arg bool set-build-description: Set build description to build cause
-        (eg. Merge request or Git Push ) (default: True)
+        (eg. Merge request or Git Push) (default true)
     :arg bool add-note-merge-request: Add note with build status on
-        merge requests (default: True)
+        merge requests (default true)
     :arg bool add-vote-merge-request: Vote added to note with build status
-        on merge requests (default: True)
+        on merge requests (>= 1.1.27) (default true)
+    :arg bool accept-merge-request-on-success: Automatically accept the Merge
+        Request if the build is successful (>= 1.1.27) (default false)
+    :arg bool add-ci-message: Add CI build status (1.1.28 - 1.2.0) (default
+        false)
     :arg bool allow-all-branches: Allow all branches (Ignoring Filtered
-        Branches) (default: False)
+        Branches) (< 1.1.29) (default false)
+    :arg str branch-filter-type: Filter branches that can trigger a build.
+        Valid values and their additional attributes are described in the
+        `branch filter type`_ table (>= 1.1.29) (default 'All').
     :arg list include-branches: Defined list of branches to include
-        (default: [])
+        (default [])
     :arg list exclude-branches: Defined list of branches to exclude
-        (default: [])
+        (default [])
+    :arg str target-branch-regex: Regular expression to select branches
 
-    Example:
+    .. _`branch filter type`:
 
-    .. literalinclude::
-        /../../tests/triggers/fixtures/gitlab001.yaml
+    ================== ====================================================
+    Branch filter type Description
+    ================== ====================================================
+    All                All branches are allowed to trigger this job.
+    NameBasedFilter    Filter branches by name.
+                       List source branches that are allowed to trigger a
+                       build from a Push event or a Merge Request event. If
+                       both fields are left empty, all branches are allowed
+                       to trigger this job. For Merge Request events only
+                       the target branch name is filtered out by the
+                       **include-branches** and **exclude-branches** lists.
+
+    RegexBasedFilter   Filter branches by regex
+                       The target branch regex allows to limit the
+                       execution of this job to certain branches. Any
+                       branch matching the specified pattern in
+                       **target-branch-regex** triggers the job. No
+                       filtering is performed if the field is left empty.
+    ================== ====================================================
+
+    Example (version < 1.1.26):
+
+    .. literalinclude:: /../../tests/triggers/fixtures/gitlab001.yaml
+       :language: yaml
+
+    Minimal example (version >= 1.1.26):
+
+    .. literalinclude:: /../../tests/triggers/fixtures/gitlab005.yaml
+       :language: yaml
+
+    Full example (version >= 1.1.26):
+
+    .. literalinclude:: /../../tests/triggers/fixtures/gitlab004.yaml
+       :language: yaml
     """
     def _add_xml(elem, name, value):
         XML.SubElement(elem, name).text = value
@@ -1094,34 +1308,67 @@ def gitlab(parser, xml_parent, data):
         xml_parent, 'com.dabsquared.gitlabjenkins.GitLabPushTrigger'
     )
 
-    bool_mapping = (
+    plugin_info = registry.get_plugin_info('GitLab Plugin')
+    # Note: Assume latest version of plugin is preferred config format
+    plugin_ver = pkg_resources.parse_version(
+        plugin_info.get('version', str(sys.maxsize)))
+
+    valid_merge_request = ['never', 'source', 'both']
+
+    if plugin_ver >= pkg_resources.parse_version("1.1.26"):
+        mapping = [
+            ('trigger-open-merge-request-push',
+             'triggerOpenMergeRequestOnPush', 'never', valid_merge_request)]
+        convert_mapping_to_xml(gitlab, data, mapping, fail_required=True)
+    else:
+        mapping = [
+            ('trigger-open-merge-request-push',
+             'triggerOpenMergeRequestOnPush', True)]
+        convert_mapping_to_xml(gitlab, data, mapping, fail_required=True)
+
+    if plugin_ver < pkg_resources.parse_version('1.2.0'):
+        if data.get('branch-filter-type', '') == 'All':
+            data['branch-filter-type'] = ''
+        valid_filters = ['', 'NameBasedFilter', 'RegexBasedFilter']
+        mapping = [
+            ('branch-filter-type', 'branchFilterName', '', valid_filters)]
+        convert_mapping_to_xml(gitlab, data, mapping, fail_required=True)
+    else:
+        valid_filters = ['All', 'NameBasedFilter', 'RegexBasedFilter']
+        mapping = [
+            ('branch-filter-type', 'branchFilterType', 'All', valid_filters)]
+        convert_mapping_to_xml(gitlab, data, mapping, fail_required=True)
+
+    XML.SubElement(gitlab, 'spec').text = ''
+    mapping = [
         ('trigger-push', 'triggerOnPush', True),
         ('trigger-merge-request', 'triggerOnMergeRequest', True),
-        ('trigger-open-merge-request-push', 'triggerOpenMergeRequestOnPush',
-            True),
+        ('trigger-note', 'triggerOnNoteRequest', True),
+        ('note-regex', 'noteRegex', 'Jenkins please retry a build'),
         ('ci-skip', 'ciSkip', True),
+        ('wip-skip', 'skipWorkInProgressMergeRequest', True),
         ('set-build-description', 'setBuildDescription', True),
         ('add-note-merge-request', 'addNoteOnMergeRequest', True),
         ('add-vote-merge-request', 'addVoteOnMergeRequest', True),
+        ('accept-merge-request-on-success', 'acceptMergeRequestOnSuccess',
+         False),
+        ('add-ci-message', 'addCiMessage', False),
         ('allow-all-branches', 'allowAllBranches', False),
-    )
+        ('target-branch-regex', 'targetBranchRegex', '')
+    ]
+
     list_mapping = (
         ('include-branches', 'includeBranchesSpec', []),
         ('exclude-branches', 'excludeBranchesSpec', []),
     )
-
-    XML.SubElement(gitlab, 'spec').text = ''
-
-    for yaml_name, xml_name, default_val in bool_mapping:
-        value = str(data.get(yaml_name, default_val)).lower()
-        _add_xml(gitlab, xml_name, value)
+    convert_mapping_to_xml(gitlab, data, mapping, fail_required=True)
 
     for yaml_name, xml_name, default_val in list_mapping:
         value = ', '.join(data.get(yaml_name, default_val))
         _add_xml(gitlab, xml_name, value)
 
 
-def build_result(parser, xml_parent, data):
+def build_result(registry, xml_parent, data):
     """yaml: build-result
     Configure jobB to monitor jobA build result. A build is scheduled if there
     is a new build result that matches your criteria (unstable, failure, ...).
@@ -1188,7 +1435,7 @@ def build_result(parser, xml_parent, data):
             XML.SubElement(model_checked, 'checked').text = result_dict[result]
 
 
-def reverse(parser, xml_parent, data):
+def reverse(registry, xml_parent, data):
     """yaml: reverse
     This trigger can be configured in the UI using the checkbox with the
     following text: 'Build after other projects are built'.
@@ -1228,7 +1475,7 @@ def reverse(parser, xml_parent, data):
         jobs
 
     threshold = XML.SubElement(reserveBuildTrigger, 'threshold')
-    result = data.get('result').upper()
+    result = str(data.get('result', 'success')).upper()
     if result not in supported_thresholds:
         raise jenkins_jobs.errors.JenkinsJobsException(
             "Choice should be one of the following options: %s." %
@@ -1243,41 +1490,50 @@ def reverse(parser, xml_parent, data):
         str(hudson_model.THRESHOLDS[result]['complete']).lower()
 
 
-def monitor_folders(parser, xml_parent, data):
+def monitor_folders(registry, xml_parent, data):
     """yaml: monitor-folders
     Configure Jenkins to monitor folders.
     Requires the Jenkins :jenkins-wiki:`Filesystem Trigger Plugin
-    <FSTriggerPlugin>`.
+    <FSTrigger+Plugin>`.
 
-    :arg str path: Folder path to poll. (optional)
+    :arg str path: Folder path to poll. (default '')
     :arg list includes: Fileset includes setting that specifies the list of
       includes files. Basedir of the fileset is relative to the workspace
-      root. If no value is set, all files are used. (optional)
+      root. If no value is set, all files are used. (default '')
     :arg str excludes: The 'excludes' pattern. A file that matches this mask
       will not be polled even if it matches the mask specified in 'includes'
-      section. (optional)
+      section. (default '')
     :arg bool check-modification-date: Check last modification date.
       (default true)
     :arg bool check-content: Check content. (default true)
-    :arg bool check-fewer: Check fewer or more files (default true)
+    :arg bool check-fewer: Check fewer files (default true)
     :arg str cron: cron syntax of when to run (default '')
 
-    Example:
+    Full Example:
 
-    .. literalinclude:: /../../tests/triggers/fixtures/monitor_folders.yaml
+    .. literalinclude::
+       /../../tests/triggers/fixtures/monitor-folders-full.yaml
+       :language: yaml
+
+    Minimal Example:
+
+    .. literalinclude::
+       /../../tests/triggers/fixtures/monitor-folders-minimal.yaml
+       :language: yaml
     """
     ft = XML.SubElement(xml_parent, ('org.jenkinsci.plugins.fstrigger.'
                                      'triggers.FolderContentTrigger'))
-    path = data.get('path')
-    if path:
-        XML.SubElement(ft, 'path').text = path
-    includes = data.get('includes')
-    if includes:
-        XML.SubElement(ft, 'includes').text = ",".join(includes)
-    excludes = data.get('excludes')
-    if excludes:
-        XML.SubElement(ft, 'excludes').text = excludes
-    XML.SubElement(ft, 'spec').text = data.get('cron', '')
+    ft.set('plugin', 'fstrigger')
+
+    mappings = [
+        ('path', 'path', ''),
+        ('cron', 'spec', ''),
+    ]
+    convert_mapping_to_xml(ft, data, mappings, fail_required=True)
+
+    includes = data.get('includes', '')
+    XML.SubElement(ft, 'includes').text = ",".join(includes)
+    XML.SubElement(ft, 'excludes').text = data.get('excludes', '')
     XML.SubElement(ft, 'excludeCheckLastModificationDate').text = str(
         not data.get('check-modification-date', True)).lower()
     XML.SubElement(ft, 'excludeCheckContent').text = str(
@@ -1286,11 +1542,11 @@ def monitor_folders(parser, xml_parent, data):
         not data.get('check-fewer', True)).lower()
 
 
-def monitor_files(parser, xml_parent, data):
+def monitor_files(registry, xml_parent, data):
     """yaml: monitor-files
     Configure Jenkins to monitor files.
     Requires the Jenkins :jenkins-wiki:`Filesystem Trigger Plugin
-    <FSTriggerPlugin>`.
+    <FSTrigger+Plugin>`.
 
     :arg list files: List of files to monitor
 
@@ -1430,7 +1686,7 @@ def monitor_files(parser, xml_parent, data):
                 file_info.get('ignore-modificaton-date', True)).lower()
 
 
-def ivy(parser, xml_parent, data):
+def ivy(registry, xml_parent, data):
     """yaml: ivy
     Poll with an Ivy script
     Requires the Jenkins :jenkins-wiki:`IvyTrigger Plugin
@@ -1478,7 +1734,7 @@ def ivy(parser, xml_parent, data):
         XML.SubElement(it, 'triggerLabel').text = label
 
 
-def script(parser, xml_parent, data):
+def script(registry, xml_parent, data):
     """yaml: script
     Triggers the job using shell or batch script.
     Requires the Jenkins :jenkins-wiki:`ScriptTrigger Plugin
@@ -1486,38 +1742,42 @@ def script(parser, xml_parent, data):
 
     :arg str label: Restrict where the polling should run. (default '')
     :arg str script: A shell or batch script. (default '')
-    :arg str script-file-path: A shell or batch script path. (optional)
+    :arg str script-file-path: A shell or batch script path. (default '')
     :arg str cron: cron syntax of when to run (default '')
     :arg bool enable-concurrent:  Enables triggering concurrent builds.
                                   (default false)
     :arg int exit-code:  If the exit code of the script execution returns this
                          expected exit code, a build is scheduled. (default 0)
 
-    Example:
+    Full Example:
 
-    .. literalinclude:: /../../tests/triggers/fixtures/script.yaml
+    .. literalinclude:: /../../tests/triggers/fixtures/script-full.yaml
+       :language: yaml
+
+    Minimal Example:
+
+    .. literalinclude:: /../../tests/triggers/fixtures/script-minimal.yaml
+       :language: yaml
     """
-    data = data if data else {}
     st = XML.SubElement(
         xml_parent,
         'org.jenkinsci.plugins.scripttrigger.ScriptTrigger'
     )
+    st.set('plugin', 'scripttrigger')
     label = data.get('label')
-
-    XML.SubElement(st, 'script').text = str(data.get('script', ''))
-    if 'script-file-path' in data:
-        XML.SubElement(st, 'scriptFilePath').text = str(
-            data.get('script-file-path'))
-    XML.SubElement(st, 'spec').text = str(data.get('cron', ''))
-    XML.SubElement(st, 'labelRestriction').text = str(bool(label)).lower()
-    if label:
-        XML.SubElement(st, 'triggerLabel').text = label
-    XML.SubElement(st, 'enableConcurrentBuild').text = str(
-        data.get('enable-concurrent', False)).lower()
-    XML.SubElement(st, 'exitCode').text = str(data.get('exit-code', 0))
+    mappings = [
+        ('script', 'script', ''),
+        ('script-file-path', 'scriptFilePath', ''),
+        ('cron', 'spec', ''),
+        ('enable-concurrent', 'enableConcurrentBuild', False),
+        ('exit-code', 'exitCode', 0),
+        ('', 'labelRestriction', bool(label)),
+        ('', 'triggerLabel', label),
+    ]
+    convert_mapping_to_xml(st, data, mappings, fail_required=False)
 
 
-def groovy_script(parser, xml_parent, data):
+def groovy_script(registry, xml_parent, data):
     """yaml: groovy-script
     Triggers the job using a groovy script.
     Requires the Jenkins :jenkins-wiki:`ScriptTrigger Plugin
@@ -1531,35 +1791,210 @@ def groovy_script(parser, xml_parent, data):
       evaluated to true, a build is scheduled. (default '')
     :arg str script-file-path: Groovy script path. (default '')
     :arg str property-file-path: Property file path. All properties will be set
-      as parameters for the triggered build. (optional)
+      as parameters for the triggered build. (default '')
     :arg bool enable-concurrent: Enable concurrent build. (default false)
     :arg str label: Restrict where the polling should run. (default '')
     :arg str cron: cron syntax of when to run (default '')
 
-    Example:
+    Full Example:
 
-    .. literalinclude:: /../../tests/triggers/fixtures/groovy-script.yaml
+    .. literalinclude:: /../../tests/triggers/fixtures/groovy-script-full.yaml
+       :language: yaml
+
+    Minimal Example:
+
+    .. literalinclude::
+        /../../tests/triggers/fixtures/groovy-script-minimal.yaml
+       :language: yaml
     """
     gst = XML.SubElement(
         xml_parent,
         'org.jenkinsci.plugins.scripttrigger.groovy.GroovyScriptTrigger'
     )
+    gst.set('plugin', 'scripttrigger')
 
-    XML.SubElement(gst, 'groovySystemScript').text = str(
-        data.get('system-script', False)).lower()
-    XML.SubElement(gst, 'groovyExpression').text = str(data.get('script', ''))
-    XML.SubElement(gst, 'groovyFilePath').text = str(data.get(
-        'script-file-path', ''))
-    if 'property-file-path' in data:
-        XML.SubElement(gst, 'propertiesFilePath').text = str(
-            data.get('property-file-path'))
-    XML.SubElement(gst, 'enableConcurrentBuild').text = str(
-        data.get('enable-concurrent', False)).lower()
     label = data.get('label')
-    XML.SubElement(gst, 'labelRestriction').text = str(bool(label)).lower()
-    if label:
-        XML.SubElement(gst, 'triggerLabel').text = label
-    XML.SubElement(gst, 'spec').text = str(data.get('cron', ''))
+    mappings = [
+        ('system-script', 'groovySystemScript', False),
+        ('script', 'groovyExpression', ''),
+        ('script-file-path', 'groovyFilePath', ''),
+        ('property-file-path', 'propertiesFilePath', ''),
+        ('enable-concurrent', 'enableConcurrentBuild', False),
+        ('cron', 'spec', ''),
+        ('', 'labelRestriction', bool(label)),
+        ('', 'triggerLabel', label),
+    ]
+    convert_mapping_to_xml(gst, data, mappings, fail_required=False)
+
+
+def rabbitmq(registry, xml_parent, data):
+    """yaml: rabbitmq
+    This plugin triggers build using remote build message in RabbitMQ queue.
+    Requires the Jenkins :jenkins-wiki:`RabbitMQ Build Trigger Plugin
+    <RabbitMQ+Build+Trigger+Plugin>`.
+
+    :arg str token: the build token expected in the message queue (required)
+
+    Example:
+
+    .. literalinclude:: /../../tests/triggers/fixtures/rabbitmq.yaml
+       :language: yaml
+    """
+
+    rabbitmq = XML.SubElement(
+        xml_parent,
+        'org.jenkinsci.plugins.rabbitmqbuildtrigger.'
+        'RemoteBuildTrigger')
+    mapping = [
+        ('', 'spec', ''),
+        ('token', 'remoteBuildToken', None)]
+    convert_mapping_to_xml(rabbitmq, data, mapping, fail_required=True)
+
+
+def parameterized_timer(parser, xml_parent, data):
+    """yaml: parameterized-timer
+    Trigger builds with parameters at certain times.
+    Requires the Jenkins :jenkins-wiki:`Parameterized Scheduler Plugin
+    <Parameterized+Scheduler+Plugin>`.
+
+    :arg str cron: cron syntax of when to run and with which parameters
+        (required)
+
+    Example:
+
+    .. literalinclude::
+        /../../tests/triggers/fixtures/parameterized-timer001.yaml
+       :language: yaml
+    """
+
+    param_timer = XML.SubElement(
+        xml_parent,
+        'org.jenkinsci.plugins.parameterizedscheduler.'
+        'ParameterizedTimerTrigger')
+    mapping = [
+        ('', 'spec', ''),
+        ('cron', 'parameterizedSpecification', None)]
+    convert_mapping_to_xml(param_timer, data, mapping, fail_required=True)
+
+
+def jira_comment_trigger(registry, xml_parent, data):
+    """yaml: jira-comment-trigger
+    Trigger builds when a comment is added to JIRA.
+    Requires the Jenkins :jenkins-wiki:`JIRA Trigger Plugin
+    <JIRA+Trigger+Plugin>`.
+
+    :arg str jql-filter: Must match updated issues to trigger a build.
+        (default '')
+    :arg str comment-pattern: Triggers build only when the comment added to
+        JIRA matches pattern (default '(?i)build this please')
+    :arg list parameter-mapping:
+
+        :Issue Attribute Path:
+            * **jenkins-parameter** (`str`) -- Jenkins parameter name
+                (default '')
+            * **issue-attribute-path** (`str`) -- Attribute path (default '')
+
+    Minimal Example:
+
+    .. literalinclude::
+        /../../tests/triggers/fixtures/jira-comment-trigger-minimal.yaml
+       :language: yaml
+
+    Full Example:
+
+    .. literalinclude::
+        /../../tests/triggers/fixtures/jira-comment-trigger-full.yaml
+       :language: yaml
+    """
+    jct = XML.SubElement(xml_parent, 'com.ceilfors.jenkins.plugins.'
+                         'jiratrigger.JiraCommentTrigger')
+    jct.set('plugin', 'jira-trigger')
+    mapping = [
+        ('jql-filter', 'jqlFilter', ''),
+        ('comment-pattern', 'commentPattern', '(?i)build this please')]
+    convert_mapping_to_xml(jct, data, mapping, fail_required=True)
+
+    param = XML.SubElement(jct, 'parameterMappings')
+    for parameter in data.get('parameter-mapping', []):
+        parent = XML.SubElement(param, 'com.ceilfors.jenkins.plugins.'
+                                'jiratrigger.parameter.'
+                                'IssueAttributePathParameterMapping')
+        parameter_mappings = [
+            ('jenkins-parameter', 'jenkinsParameter', ''),
+            ('issue-attribute-path', 'issueAttributePath', '')]
+        convert_mapping_to_xml(
+            parent, parameter, parameter_mappings, fail_required=True)
+
+
+def stash_pull_request(registry, xml_parent, data):
+    """yaml: stash-pull-request
+    Trigger builds via Stash/Bitbucket Server Pull Requests.
+    Requires the Jenkins :jenkins-wiki:`Stash Pull Request Builder Plugin
+    <Stash+pullrequest+builder+plugin>`.
+
+      :arg str cron: cron syntax of when to run (required)
+      :arg str stash-host: The HTTP or HTTPS URL of the Stash host (NOT ssh).
+          e.g.: https://example.com (required)
+      :arg str credentials-id: Jenkins credential set to use. (required)
+      :arg str project: Abbreviated project code. e.g.: PRJ or ~user (required)
+      :arg str repository: Stash Repository Name.  e.g.:  Repo (required)
+      :arg str ci-skip-phrases: CI Skip Phrases. (default 'NO TEST')
+      :arg str ci-build-phrases: CI Build Phrases. (default 'test this please')
+      :arg str target-branches: Target branches to filter. (default '')
+      :arg bool ignore-ssl: Ignore SSL certificates for Stash host.
+          (default false)
+      :arg bool check-destination-commit: Rebuild if destination branch
+          changes. (default false)
+      :arg bool check-mergable: Build only if PR is mergeable. (default false)
+      :arg bool merge-on-success: Merge PR if build is successful.
+          (default false)
+      :arg bool check-not-conflicted: Build only if Stash reports no conflicts.
+          (default false)
+      :arg bool only-build-on-comment: Only build when asked (with test
+          phrase). (default false)
+      :arg bool delete-previous-build-finish-comments: Keep PR comment only for
+          most recent Build. (default false)
+      :arg bool cancel-outdated-jobs: Cancel outdated jobs. (default false)
+
+      Minimal Example:
+
+      .. literalinclude::
+          /../../tests/triggers/fixtures/stash-pull-request-minimal.yaml
+         :language: yaml
+
+      Full Example:
+
+      .. literalinclude::
+          /../../tests/triggers/fixtures/stash-pull-request-full.yaml
+         :language: yaml
+    """
+
+    pr_trigger = XML.SubElement(
+        xml_parent,
+        'stashpullrequestbuilder.stashpullrequestbuilder.StashBuildTrigger')
+    pr_trigger.set('plugin', 'stash-pullrequest-builder')
+
+    mappings = [
+        ('cron', 'spec', None),  # Spec needs to be set to the same as cron
+        ('cron', 'cron', None),
+        ('stash-host', 'stashHost', None),
+        ('credentials-id', 'credentialsId', None),
+        ('project', 'projectCode', None),
+        ('repository', 'repositoryName', None),
+        ('ci-skip-phrases', 'ciSkipPhrases', 'NO TEST'),
+        ('ci-build-phrases', 'ciBuildPhrases', 'test this please'),
+        ('target-branches', 'targetBranchesToBuild', ''),
+        ('ignore-ssl', 'ignoreSsl', False),
+        ('check-destination-commit', 'checkDestinationCommit', False),
+        ('check-mergable', 'checkMergeable', False),
+        ('merge-on-success', 'mergeOnSuccess', False),
+        ('check-not-conflicted', 'checkNotConflicted', True),
+        ('only-build-on-comment', 'onlyBuildOnComment', False),
+        ('delete-previous-build-finish-comments',
+            'deletePreviousBuildFinishComments', False),
+        ('cancel-outdated-jobs', 'cancelOutdatedJobsEnabled', False),
+    ]
+    convert_mapping_to_xml(pr_trigger, data, mappings, fail_required=True)
 
 
 class Triggers(jenkins_jobs.modules.base.Base):
@@ -1568,11 +2003,11 @@ class Triggers(jenkins_jobs.modules.base.Base):
     component_type = 'trigger'
     component_list_type = 'triggers'
 
-    def gen_xml(self, parser, xml_parent, data):
+    def gen_xml(self, xml_parent, data):
         triggers = data.get('triggers', [])
         if not triggers:
             return
 
         trig_e = XML.SubElement(xml_parent, 'triggers', {'class': 'vector'})
         for trigger in triggers:
-            self.registry.dispatch('trigger', parser, trig_e, trigger)
+            self.registry.dispatch('trigger', trig_e, trigger)

@@ -22,7 +22,7 @@ Example:
 :Job Parameters:
     * **project-type**:
       Defaults to "freestyle", but "maven" as well as "multijob", "flow",
-      "workflow" or "externaljob" can also be specified.
+      "pipeline" or "externaljob" can also be specified.
 
     * **defaults**:
       Specifies a set of :ref:`defaults` to use for this job, defaults to
@@ -55,6 +55,12 @@ Example:
     * **workspace**:
       Path for a custom workspace. Defaults to Jenkins default
       configuration.
+
+    * **folder**:
+      The folder attribute provides an alternative to using '<path>/<name>' as
+      the job name to specify which Jenkins folder to upload the job to.
+      Requires the `CloudBees Folders Plugin.
+      <https://wiki.jenkins-ci.org/display/JENKINS/CloudBees+Folders+Plugin>`_
 
     * **child-workspace**:
       Path for a child custom workspace. Defaults to Jenkins default
@@ -94,22 +100,29 @@ Example:
       The Logrotate section allows you to automatically remove old build
       history. It adds the ``logrotate`` attribute to the :ref:`Job`
       definition. All logrotate attributes default to "-1" (keep forever).
+      **Deprecated on jenkins >=1.637**: use the ``build-discarder``
+      property instead
+
+    * **jdk**:
+      The name of the jdk to use
 
     * **raw**:
       If present, this section should contain a single **xml** entry. This XML
       will be inserted at the top-level of the :ref:`Job` definition.
-
 """
 
+import logging
 import xml.etree.ElementTree as XML
+
 import jenkins_jobs.modules.base
 from jenkins_jobs.xml_config import remove_ignorable_whitespace
 
 
 class General(jenkins_jobs.modules.base.Base):
     sequence = 10
+    logrotate_warn_issued = False
 
-    def gen_xml(self, parser, xml, data):
+    def gen_xml(self, xml, data):
         jdk = data.get('jdk', None)
         if jdk:
             XML.SubElement(xml, 'jdk').text = jdk
@@ -119,12 +132,15 @@ class General(jenkins_jobs.modules.base.Base):
             description = XML.SubElement(xml, 'description')
             description.text = desc_text
         XML.SubElement(xml, 'keepDependencies').text = 'false'
+
+        # Need to ensure we support the None parameter to allow disabled to
+        # remain the last setting if the user purposely adds and then removes
+        # the disabled parameter.
+        # See: http://lists.openstack.org/pipermail/openstack-infra/2016-March/003980.html  # noqa
         disabled = data.get('disabled', None)
         if disabled is not None:
-            if disabled:
-                XML.SubElement(xml, 'disabled').text = 'true'
-            else:
-                XML.SubElement(xml, 'disabled').text = 'false'
+            XML.SubElement(xml, 'disabled').text = str(disabled).lower()
+
         if 'display-name' in data:
             XML.SubElement(xml, 'displayName').text = data['display-name']
         if data.get('block-downstream'):
@@ -164,6 +180,12 @@ class General(jenkins_jobs.modules.base.Base):
                 str(data['retry-count'])
 
         if 'logrotate' in data:
+            if not self.logrotate_warn_issued:
+                logging.warning('logrotate is deprecated on jenkins>=1.637,'
+                                ' the property build-discarder on newer'
+                                ' jenkins instead')
+                self.logrotate_warn_issued = True
+
             lr_xml = XML.SubElement(xml, 'logRotator')
             logrotate = data['logrotate']
             lr_days = XML.SubElement(lr_xml, 'daysToKeep')
@@ -176,10 +198,10 @@ class General(jenkins_jobs.modules.base.Base):
             lr_anum.text = str(logrotate.get('artifactNumToKeep', -1))
 
         if 'raw' in data:
-            raw(parser, xml, data['raw'])
+            raw(self.registry, xml, data['raw'])
 
 
-def raw(parser, xml_parent, data):
+def raw(registry, xml_parent, data):
     # documented in definition.rst since includes and docs is not working well
     # For cross cutting method like this
     root = XML.fromstring(data.get('xml'))

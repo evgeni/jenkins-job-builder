@@ -17,36 +17,44 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import doctest
 import io
+import json
+import logging
 import os
 import re
-import doctest
-import logging
+import xml.etree.ElementTree as XML
+
 import fixtures
-import json
-import operator
+import six
+from six.moves import StringIO
 import testtools
 from testtools.content import text_content
-import xml.etree.ElementTree as XML
-from six.moves import configparser
-from six.moves import StringIO
+import testscenarios
 from yaml import safe_dump
+
+from jenkins_jobs.config import JJBConfig
+from jenkins_jobs.errors import InvalidAttributeError
+import jenkins_jobs.local_yaml as yaml
+from jenkins_jobs.alphanum import AlphanumSort
+from jenkins_jobs.modules import project_externaljob
+from jenkins_jobs.modules import project_flow
+from jenkins_jobs.modules import project_matrix
+from jenkins_jobs.modules import project_maven
+from jenkins_jobs.modules import project_multijob
+from jenkins_jobs.modules import view_list
+from jenkins_jobs.modules import view_pipeline
+from jenkins_jobs.parser import YamlParser
+from jenkins_jobs.registry import ModuleRegistry
+from jenkins_jobs.xml_config import XmlJob
+from jenkins_jobs.xml_config import XmlJobGenerator
+
 # This dance deals with the fact that we want unittest.mock if
 # we're on Python 3.4 and later, and non-stdlib mock otherwise.
 try:
-    from unittest import mock
+    from unittest import mock  # noqa
 except ImportError:
     import mock  # noqa
-
-from jenkins_jobs.cmd import DEFAULT_CONF
-import jenkins_jobs.local_yaml as yaml
-from jenkins_jobs.parser import YamlParser
-from jenkins_jobs.xml_config import XmlJob
-from jenkins_jobs.modules import (project_flow,
-                                  project_matrix,
-                                  project_maven,
-                                  project_multijob,
-                                  project_externaljob)
 
 
 def get_scenarios(fixtures_path, in_ext='yaml', out_ext='xml',
@@ -57,11 +65,16 @@ def get_scenarios(fixtures_path, in_ext='yaml', out_ext='xml',
         - content of the fixture output file (aka expected)
     """
     scenarios = []
-    files = []
-    for dirpath, dirs, fs in os.walk(fixtures_path):
-        files.extend([os.path.join(dirpath, f) for f in fs])
+    files = {}
+    for dirpath, _, fs in os.walk(fixtures_path):
+        for fn in fs:
+            if fn in files:
+                files[fn].append(os.path.join(dirpath, fn))
+            else:
+                files[fn] = [os.path.join(dirpath, fn)]
 
-    input_files = [f for f in files if re.match(r'.*\.{0}$'.format(in_ext), f)]
+    input_files = [files[f][0] for f in files if
+                   re.match(r'.*\.{0}$'.format(in_ext), f)]
 
     for input_filename in input_files:
         if input_filename.endswith(plugins_info_ext):
@@ -73,54 +86,56 @@ def get_scenarios(fixtures_path, in_ext='yaml', out_ext='xml',
         output_candidate = re.sub(r'\.{0}$'.format(in_ext),
                                   '.{0}'.format(out_ext), input_filename)
         # assume empty file if no output candidate found
-        if output_candidate not in files:
-            output_candidate = None
+        if os.path.basename(output_candidate) in files:
+            out_filenames = files[os.path.basename(output_candidate)]
+        else:
+            out_filenames = None
 
         plugins_info_candidate = re.sub(r'\.{0}$'.format(in_ext),
                                         '.{0}'.format(plugins_info_ext),
                                         input_filename)
-        if plugins_info_candidate not in files:
+        if os.path.basename(plugins_info_candidate) not in files:
             plugins_info_candidate = None
 
         conf_candidate = re.sub(r'\.yaml$|\.json$', '.conf', input_filename)
-        # If present, add the configuration file
-        if conf_candidate not in files:
-            conf_candidate = None
+        conf_filename = files.get(os.path.basename(conf_candidate), None)
+
+        if conf_filename:
+            conf_filename = conf_filename[0]
+        else:
+            # for testing purposes we want to avoid using user config files
+            conf_filename = os.devnull
 
         scenarios.append((input_filename, {
             'in_filename': input_filename,
-            'out_filename': output_candidate,
-            'conf_filename': conf_candidate,
+            'out_filenames': out_filenames,
+            'conf_filename': conf_filename,
             'plugins_info_filename': plugins_info_candidate,
         }))
 
     return scenarios
 
 
-class LoggingFixture(object):
-
-    def setUp(self):
-
-        super(LoggingFixture, self).setUp()
-        self.useFixture(fixtures.FakeLogger(level=logging.DEBUG))
-
-
-class BaseTestCase(LoggingFixture):
-    scenarios = []
-    fixtures_path = None
+class BaseTestCase(testtools.TestCase):
 
     # TestCase settings:
     maxDiff = None      # always dump text difference
     longMessage = True  # keep normal error message when providing our
 
+    def setUp(self):
+
+        super(BaseTestCase, self).setUp()
+        self.logger = self.useFixture(fixtures.FakeLogger(level=logging.DEBUG))
+
     def _read_utf8_content(self):
         # if None assume empty file
-        if self.out_filename is None:
+        if not self.out_filenames:
             return u""
 
         # Read XML content, assuming it is unicode encoded
-        xml_content = u"%s" % io.open(self.out_filename,
-                                      'r', encoding='utf-8').read()
+        xml_content = ""
+        for f in sorted(self.out_filenames):
+            xml_content += u"%s" % io.open(f, 'r', encoding='utf-8').read()
         return xml_content
 
     def _read_yaml_content(self, filename):
@@ -129,53 +144,86 @@ class BaseTestCase(LoggingFixture):
         return yaml_content
 
     def _get_config(self):
-        config = configparser.ConfigParser()
-        config.readfp(StringIO(DEFAULT_CONF))
-        if self.conf_filename is not None:
-            with io.open(self.conf_filename, 'r', encoding='utf-8') as cf:
-                config.readfp(cf)
-        return config
+        jjb_config = JJBConfig(self.conf_filename)
+        jjb_config.validate()
+
+        return jjb_config
+
+
+class BaseScenariosTestCase(testscenarios.TestWithScenarios, BaseTestCase):
+
+    scenarios = []
+    fixtures_path = None
 
     def test_yaml_snippet(self):
         if not self.in_filename:
             return
 
-        config = self._get_config()
+        jjb_config = self._get_config()
 
         expected_xml = self._read_utf8_content()
         yaml_content = self._read_yaml_content(self.in_filename)
-        project = None
-        if ('project-type' in yaml_content):
-            if (yaml_content['project-type'] == "maven"):
-                project = project_maven.Maven(None)
-            elif (yaml_content['project-type'] == "matrix"):
-                project = project_matrix.Matrix(None)
-            elif (yaml_content['project-type'] == "flow"):
-                project = project_flow.Flow(None)
-            elif (yaml_content['project-type'] == "multijob"):
-                project = project_multijob.MultiJob(None)
-            elif (yaml_content['project-type'] == "externaljob"):
-                project = project_externaljob.ExternalJob(None)
-
-        if project:
-            xml_project = project.root_xml(yaml_content)
-        else:
-            xml_project = XML.Element('project')
 
         plugins_info = None
-        if self.plugins_info_filename is not None:
+        if self.plugins_info_filename:
             plugins_info = self._read_yaml_content(self.plugins_info_filename)
             self.addDetail("plugins-info-filename",
                            text_content(self.plugins_info_filename))
             self.addDetail("plugins-info",
                            text_content(str(plugins_info)))
 
-        parser = YamlParser(config, plugins_info)
+        parser = YamlParser(jjb_config)
+        registry = ModuleRegistry(jjb_config, plugins_info)
+        registry.set_parser_data(parser.data)
 
-        pub = self.klass(parser.registry)
+        pub = self.klass(registry)
+
+        project = None
+        if ('project-type' in yaml_content):
+            if (yaml_content['project-type'] == "maven"):
+                project = project_maven.Maven(registry)
+            elif (yaml_content['project-type'] == "matrix"):
+                project = project_matrix.Matrix(registry)
+            elif (yaml_content['project-type'] == "flow"):
+                project = project_flow.Flow(registry)
+            elif (yaml_content['project-type'] == "multijob"):
+                project = project_multijob.MultiJob(registry)
+            elif (yaml_content['project-type'] == "externaljob"):
+                project = project_externaljob.ExternalJob(registry)
+
+        if 'view-type' in yaml_content:
+            if yaml_content['view-type'] == "list":
+                project = view_list.List(None)
+            elif yaml_content['view-type'] == "pipeline":
+                project = view_pipeline.Pipeline(None)
+            else:
+                raise InvalidAttributeError(
+                    'view-type', yaml_content['view-type'])
+
+        if project:
+            xml_project = project.root_xml(yaml_content)
+        else:
+            xml_project = XML.Element('project')
 
         # Generate the XML tree directly with modules/general
-        pub.gen_xml(parser, xml_project, yaml_content)
+        pub.gen_xml(xml_project, yaml_content)
+
+        # check output file is under correct path
+        if 'name' in yaml_content:
+            prefix = os.path.dirname(self.in_filename)
+            # split using '/' since fullname uses URL path separator
+            expected_folders = [os.path.normpath(
+                os.path.join(prefix,
+                             '/'.join(parser._getfullname(yaml_content).
+                                      split('/')[:-1])))]
+            actual_folders = [os.path.dirname(f) for f in self.out_filenames]
+
+            self.assertEquals(
+                expected_folders, actual_folders,
+                "Output file under wrong path, was '%s', should be '%s'" %
+                (self.out_filenames[0],
+                 os.path.join(expected_folders[0],
+                              os.path.basename(self.out_filenames[0]))))
 
         # Prettify generated XML
         pretty_xml = XmlJob(xml_project, 'fixturejob').output().decode('utf-8')
@@ -188,7 +236,8 @@ class BaseTestCase(LoggingFixture):
         )
 
 
-class SingleJobTestCase(BaseTestCase):
+class SingleJobTestCase(BaseScenariosTestCase):
+
     def test_yaml_snippet(self):
         config = self._get_config()
 
@@ -197,15 +246,46 @@ class SingleJobTestCase(BaseTestCase):
         parser = YamlParser(config)
         parser.parse(self.in_filename)
 
-        # Generate the XML tree
-        parser.expandYaml()
-        parser.generateXML()
+        plugins_info = None
+        if self.plugins_info_filename:
+            plugins_info = self._read_yaml_content(self.plugins_info_filename)
+            self.addDetail("plugins-info-filename",
+                           text_content(self.plugins_info_filename))
+            self.addDetail("plugins-info",
+                           text_content(str(plugins_info)))
 
-        parser.xml_jobs.sort(key=operator.attrgetter('name'))
+        registry = ModuleRegistry(config, plugins_info)
+        registry.set_parser_data(parser.data)
+        job_data_list, view_data_list = parser.expandYaml(registry)
+
+        # Generate the XML tree
+        xml_generator = XmlJobGenerator(registry)
+        xml_jobs = xml_generator.generateXML(job_data_list)
+
+        xml_jobs.sort(key=AlphanumSort)
+
+        # check reference files are under correct path for folders
+        prefix = os.path.dirname(self.in_filename)
+        # split using '/' since fullname uses URL path separator
+        expected_folders = list(set([
+            os.path.normpath(
+                os.path.join(prefix,
+                             '/'.join(job_data['name'].split('/')[:-1])))
+            for job_data in job_data_list
+        ]))
+        actual_folders = [os.path.dirname(f) for f in self.out_filenames]
+
+        six.assertCountEqual(
+            self,
+            expected_folders, actual_folders,
+            "Output file under wrong path, was '%s', should be '%s'" %
+            (self.out_filenames[0],
+                os.path.join(expected_folders[0],
+                             os.path.basename(self.out_filenames[0]))))
 
         # Prettify generated XML
         pretty_xml = u"\n".join(job.output().decode('utf-8')
-                                for job in parser.xml_jobs)
+                                for job in xml_jobs)
 
         self.assertThat(
             pretty_xml,
@@ -215,7 +295,7 @@ class SingleJobTestCase(BaseTestCase):
         )
 
 
-class JsonTestCase(BaseTestCase):
+class JsonTestCase(BaseScenariosTestCase):
 
     def test_yaml_snippet(self):
         expected_json = self._read_utf8_content()
@@ -232,7 +312,7 @@ class JsonTestCase(BaseTestCase):
         )
 
 
-class YamlTestCase(BaseTestCase):
+class YamlTestCase(BaseScenariosTestCase):
 
     def test_yaml_snippet(self):
         expected_yaml = self._read_utf8_content()

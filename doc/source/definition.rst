@@ -8,6 +8,13 @@ YAML file, or a directory.  If you choose a directory, all of
 the .yaml/.yml or .json files in that directory will be read, and all the
 jobs they define will be created or updated.
 
+.. note::
+
+    Jenkins Job Builder 2.x plugins are designed to default to generating the
+    xml format for the latest supported version of JJB. This is a change in
+    behaviour from 1.x and below which defaulted to the oldest supported plugin
+    version.
+
 Definitions
 -----------
 
@@ -70,6 +77,32 @@ itself (e.g. ``{name}-unit-tests`` in the above example) will be
 substituted in. This is useful in cases where you need to trace a job
 back to its template.
 
+Sometimes it is useful to have the same job name format used even
+where the template contents may vary. `Ids` provide a mechanism to
+support such use cases in addition to simplifying referencing
+templates when the name contains the more complex substitution with
+default values.
+
+
+Default Values for Template Variables
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To facilitate reuse of templates with many variables that can be
+substituted, but where in most cases the same or no value is needed,
+it is possible to specify defaults for the variables within the
+templates themselves.
+
+This can be used to provide common settings for particular templates.
+For example:
+
+.. literalinclude::
+    /../../tests/yamlparser/fixtures/template_default_variables.yaml
+   :language: yaml
+
+To use a default value for a variable used in the name would be
+uncommon unless it was in addition to another variable. However you
+can use `Ids`_ simplify such use cases.
+
 .. _project:
 
 Project
@@ -121,6 +154,26 @@ additional variables can be specified for project variables. Example:
 
 .. literalinclude::  /../../tests/yamlparser/fixtures/templates002.yaml
 
+You can also specify some variable combinations to exclude from the matrix with
+the ``exclude`` keyword, to avoid generating jobs for those combinations. You
+can specify all the variables of the combination or only a subset, if you
+specify a subset, any value of the omited variable will match:
+
+.. literalinclude:: /../../tests/yamlparser/fixtures/template_exclude.yaml
+
+The above example will omit the jobs:
+
+ * build-axe1val1-axe2val1-axe3val2
+ * build-axe1val1-axe2val2-axe3val1
+ * build-axe1val2-axe2val2-axe3val1
+
+To achieve the same without the ``exclude`` tag one would have to do something
+a bit more complicated, that gets more complicated for each dimension in the
+combination, for the previous example, the counterpart would be:
+
+.. literalinclude::
+    /../../tests/yamlparser/fixtures/template_without_exclude.yaml
+
 Job Group
 ^^^^^^^^^
 
@@ -133,6 +186,20 @@ the Job Templates in the Job Group will be realized.  For example:
 
 Would cause the jobs `project-name-unit-tests` and `project-name-perf-tests` to be created
 in Jenkins.
+
+.. _views:
+
+Views
+^^^^^
+
+A view is a particular way of displaying a specific set of jobs. To
+create a view, you must define a view in a YAML file and have a variable called view-type with a valid value. It looks like this::
+
+  - view:
+      name: view-name
+      view-type: list
+
+Views are processed differently than Jobs and therefore will not work within a `Project`_ or a `Job Template`_.
 
 .. _macro:
 
@@ -262,6 +329,56 @@ always use ``{{`` to achieve a literal ``{``.  A generic builder will need
 to consider the correct quoting based on its use of parameters.
 
 
+.. _folders:
+
+Folders
+^^^^^^^
+
+Jenkins supports organising jobs, views, and slaves using a folder hierarchy.
+This allows for easier separation of access as well credentials and resources
+which can be assigned to only be available for a specific folder.
+
+JJB has two methods of supporting uploading jobs to a specific folder:
+
+* Name the job to contain the desired folder ``<folder>/my-job-name``
+* Use the ``folder`` attribute on a job definition, via a template, or through
+  `Defaults`_.
+
+Supporting both an attributed and use of it directly in job names allows for
+teams to have all jobs using their defaults automatically use a top-level
+folder, while still allowing for them to additionally nest jobs for their
+own preferences.
+
+Job Name Example:
+
+.. literalinclude:: /../../tests/yamlparser/fixtures/folders-job-name.yaml
+
+Folder Attribute Example:
+
+.. literalinclude:: /../../tests/yamlparser/fixtures/folders-attribute.yaml
+
+
+.. _ids:
+
+Item ID's
+^^^^^^^^^
+
+It's possible to assign an `id` to any of the blocks and then use that
+to reference it instead of the name. This has two primary functions:
+
+* A unique identifier where you wish to use the same naming format for
+  multiple templates. This allows to follow a naming scheme while
+  still using multiple templates to handle subtle variables in job
+  requirements.
+* Provides a simpler name for a `job-template` where you have multiple
+  variables including default values in the name and don't wish to have
+  to include this information in every use. This also makes changing
+  the template output name without impacting references.
+
+Example:
+
+.. literalinclude::  /../../tests/yamlparser/fixtures/template_ids.yaml
+
 .. _raw:
 
 Raw config
@@ -319,6 +436,9 @@ You can define variables that will be realized in a `Job Template`.
 .. literalinclude::  /../../tests/yamlparser/fixtures/template_honor_defaults.yaml
 
 Would create jobs ``build-i386`` and ``build-amd64``.
+
+You can also reference a variable ``{template-name}`` in any value and it will
+be subtitued by the name of the current job template being processed.
 
 .. _variable_references:
 
@@ -401,6 +521,7 @@ The bulk of the job definitions come from the following modules.
    :glob:
 
    project_*
+   view_*
    builders
    hipchat
    metadata
@@ -429,4 +550,3 @@ Generally the sequence is:
     #. builders (maven, freestyle, matrix, etc..)
     #. postbuilders (maven only, configured like :ref:`builders`)
     #. publishers/reporters/notifications
-
